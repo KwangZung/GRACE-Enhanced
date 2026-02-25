@@ -1,0 +1,7120 @@
+"static av_cold int vdadec_init(AVCodecContext *avctx)
+
+{
+
+    VDADecoderContext *ctx = avctx->priv_data;
+
+    struct vda_context *vda_ctx = &ctx->vda_ctx;
+
+    OSStatus status;
+
+    int ret;
+
+
+
+    ctx->h264_initialized = 0;
+
+
+
+    /* init pix_fmts of codec */
+
+    if (!ff_h264_vda_decoder.pix_fmts) {
+
+        if (kCFCoreFoundationVersionNumber < kCFCoreFoundationVersionNumber10_7)
+
+            ff_h264_vda_decoder.pix_fmts = vda_pixfmts_prior_10_7;
+
+        else
+
+            ff_h264_vda_decoder.pix_fmts = vda_pixfmts;
+
+    }
+
+
+
+    /* init vda */
+
+    memset(vda_ctx, 0, sizeof(struct vda_context));
+
+    vda_ctx->width = avctx->width;
+
+    vda_ctx->height = avctx->height;
+
+    vda_ctx->format = 'avc1';
+
+    vda_ctx->use_sync_decoding = 1;
+
+    vda_ctx->use_ref_buffer = 1;
+
+    ctx->pix_fmt = avctx->get_format(avctx, avctx->codec->pix_fmts);
+
+    switch (ctx->pix_fmt) {
+
+    case AV_PIX_FMT_UYVY422:
+
+        vda_ctx->cv_pix_fmt_type = '2vuy';
+
+        break;
+
+    case AV_PIX_FMT_YUYV422:
+
+        vda_ctx->cv_pix_fmt_type = 'yuvs';
+
+        break;
+
+    case AV_PIX_FMT_NV12:
+
+        vda_ctx->cv_pix_fmt_type = '420v';
+
+        break;
+
+    case AV_PIX_FMT_YUV420P:
+
+        vda_ctx->cv_pix_fmt_type = 'y420';
+
+        break;
+
+    default:
+
+        av_log(avctx, AV_LOG_ERROR, ""Unsupported pixel format: %d\n"", avctx->pix_fmt);
+
+        goto failed;
+
+    }
+
+    status = ff_vda_create_decoder(vda_ctx,
+
+                                   avctx->extradata, avctx->extradata_size);
+
+    if (status != kVDADecoderNoErr) {
+
+        av_log(avctx, AV_LOG_ERROR,
+
+                ""Failed to init VDA decoder: %d.\n"", status);
+
+        goto failed;
+
+    }
+
+    avctx->hwaccel_context = vda_ctx;
+
+
+
+    /* changes callback functions */
+
+    avctx->get_format = get_format;
+
+    avctx->get_buffer2 = get_buffer2;
+
+#if FF_API_GET_BUFFER
+
+    // force the old get_buffer to be empty
+
+    avctx->get_buffer = NULL;
+
+#endif
+
+
+
+    /* init H.264 decoder */
+
+    ret = ff_h264_decoder.init(avctx);
+
+    if (ret < 0) {
+
+        av_log(avctx, AV_LOG_ERROR, ""Failed to open H.264 decoder.\n"");
+
+        goto failed;
+
+    }
+
+    ctx->h264_initialized = 1;
+
+
+
+    return 0;
+
+
+
+failed:
+
+    vdadec_close(avctx);
+
+    return -1;
+
+}"
+"static int transcode(AVFormatContext **output_files,
+
+                     int nb_output_files,
+
+                     InputFile *input_files,
+
+                     int nb_input_files,
+
+                     StreamMap *stream_maps, int nb_stream_maps)
+
+{
+
+    int ret = 0, i, j, k, n, nb_ostreams = 0, step;
+
+
+
+    AVFormatContext *is, *os;
+
+    AVCodecContext *codec, *icodec;
+
+    OutputStream *ost, **ost_table = NULL;
+
+    InputStream *ist;
+
+    char error[1024];
+
+    int key;
+
+    int want_sdp = 1;
+
+    uint8_t no_packet[MAX_FILES]={0};
+
+    int no_packet_count=0;
+
+    int nb_frame_threshold[AVMEDIA_TYPE_NB]={0};
+
+    int nb_streams[AVMEDIA_TYPE_NB]={0};
+
+
+
+    if (rate_emu)
+
+        for (i = 0; i < nb_input_streams; i++)
+
+            input_streams[i].start = av_gettime();
+
+
+
+    /* output stream init */
+
+    nb_ostreams = 0;
+
+    for(i=0;i<nb_output_files;i++) {
+
+        os = output_files[i];
+
+        if (!os->nb_streams && !(os->oformat->flags & AVFMT_NOSTREAMS)) {
+
+            av_dump_format(output_files[i], i, output_files[i]->filename, 1);
+
+            fprintf(stderr, ""Output file #%d does not contain any stream\n"", i);
+
+            ret = AVERROR(EINVAL);
+
+            goto fail;
+
+        }
+
+        nb_ostreams += os->nb_streams;
+
+    }
+
+    if (nb_stream_maps > 0 && nb_stream_maps != nb_ostreams) {
+
+        fprintf(stderr, ""Number of stream maps must match number of output streams\n"");
+
+        ret = AVERROR(EINVAL);
+
+        goto fail;
+
+    }
+
+
+
+    /* Sanity check the mapping args -- do the input files & streams exist? */
+
+    for(i=0;i<nb_stream_maps;i++) {
+
+        int fi = stream_maps[i].file_index;
+
+        int si = stream_maps[i].stream_index;
+
+
+
+        if (fi < 0 || fi > nb_input_files - 1 ||
+
+            si < 0 || si > input_files[fi].ctx->nb_streams - 1) {
+
+            fprintf(stderr,""Could not find input stream #%d.%d\n"", fi, si);
+
+            ret = AVERROR(EINVAL);
+
+            goto fail;
+
+        }
+
+        fi = stream_maps[i].sync_file_index;
+
+        si = stream_maps[i].sync_stream_index;
+
+        if (fi < 0 || fi > nb_input_files - 1 ||
+
+            si < 0 || si > input_files[fi].ctx->nb_streams - 1) {
+
+            fprintf(stderr,""Could not find sync stream #%d.%d\n"", fi, si);
+
+            ret = AVERROR(EINVAL);
+
+            goto fail;
+
+        }
+
+    }
+
+
+
+    ost_table = av_mallocz(sizeof(OutputStream *) * nb_ostreams);
+
+    if (!ost_table)
+
+        goto fail;
+
+
+
+    for(k=0;k<nb_output_files;k++) {
+
+        os = output_files[k];
+
+        for(i=0;i<os->nb_streams;i++,n++) {
+
+            nb_streams[os->streams[i]->codec->codec_type]++;
+
+        }
+
+    }
+
+    for(step=1<<30; step; step>>=1){
+
+        int found_streams[AVMEDIA_TYPE_NB]={0};
+
+        for(j=0; j<AVMEDIA_TYPE_NB; j++)
+
+            nb_frame_threshold[j] += step;
+
+
+
+        for(j=0; j<nb_input_streams; j++) {
+
+            int skip=0;
+
+            ist = &input_streams[j];
+
+            if(opt_programid){
+
+                int pi,si;
+
+                AVFormatContext *f= input_files[ ist->file_index ].ctx;
+
+                skip=1;
+
+                for(pi=0; pi<f->nb_programs; pi++){
+
+                    AVProgram *p= f->programs[pi];
+
+                    if(p->id == opt_programid)
+
+                        for(si=0; si<p->nb_stream_indexes; si++){
+
+                            if(f->streams[ p->stream_index[si] ] == ist->st)
+
+                                skip=0;
+
+                        }
+
+                }
+
+            }
+
+            if (ist->discard && ist->st->discard != AVDISCARD_ALL && !skip
+
+                && nb_frame_threshold[ist->st->codec->codec_type] <= ist->st->codec_info_nb_frames){
+
+                found_streams[ist->st->codec->codec_type]++;
+
+            }
+
+        }
+
+        for(j=0; j<AVMEDIA_TYPE_NB; j++)
+
+            if(found_streams[j] < nb_streams[j])
+
+                nb_frame_threshold[j] -= step;
+
+    }
+
+    n = 0;
+
+    for(k=0;k<nb_output_files;k++) {
+
+        os = output_files[k];
+
+        for(i=0;i<os->nb_streams;i++,n++) {
+
+            int found;
+
+            ost = ost_table[n] = output_streams_for_file[k][i];
+
+            if (nb_stream_maps > 0) {
+
+                ost->source_index = input_files[stream_maps[n].file_index].ist_index +
+
+                    stream_maps[n].stream_index;
+
+
+
+                /* Sanity check that the stream types match */
+
+                if (input_streams[ost->source_index].st->codec->codec_type != ost->st->codec->codec_type) {
+
+                    int i= ost->file_index;
+
+                    av_dump_format(output_files[i], i, output_files[i]->filename, 1);
+
+                    fprintf(stderr, ""Codec type mismatch for mapping #%d.%d -> #%d.%d\n"",
+
+                        stream_maps[n].file_index, stream_maps[n].stream_index,
+
+                        ost->file_index, ost->index);
+
+                    ffmpeg_exit(1);
+
+                }
+
+
+
+            } else {
+
+                /* get corresponding input stream index : we select the first one with the right type */
+
+                found = 0;
+
+                for (j = 0; j < nb_input_streams; j++) {
+
+                    int skip=0;
+
+                    ist = &input_streams[j];
+
+                    if(opt_programid){
+
+                        int pi,si;
+
+                        AVFormatContext *f = input_files[ist->file_index].ctx;
+
+                        skip=1;
+
+                        for(pi=0; pi<f->nb_programs; pi++){
+
+                            AVProgram *p= f->programs[pi];
+
+                            if(p->id == opt_programid)
+
+                                for(si=0; si<p->nb_stream_indexes; si++){
+
+                                    if(f->streams[ p->stream_index[si] ] == ist->st)
+
+                                        skip=0;
+
+                                }
+
+                        }
+
+                    }
+
+                    if (ist->discard && ist->st->discard != AVDISCARD_ALL && !skip &&
+
+                        ist->st->codec->codec_type == ost->st->codec->codec_type &&
+
+                        nb_frame_threshold[ist->st->codec->codec_type] <= ist->st->codec_info_nb_frames) {
+
+                            ost->source_index = j;
+
+                            found = 1;
+
+                            break;
+
+                    }
+
+                }
+
+
+
+                if (!found) {
+
+                    if(! opt_programid) {
+
+                        /* try again and reuse existing stream */
+
+                        for (j = 0; j < nb_input_streams; j++) {
+
+                            ist = &input_streams[j];
+
+                            if (   ist->st->codec->codec_type == ost->st->codec->codec_type
+
+                                && ist->st->discard != AVDISCARD_ALL) {
+
+                                ost->source_index = j;
+
+                                found = 1;
+
+                            }
+
+                        }
+
+                    }
+
+                    if (!found) {
+
+                        int i= ost->file_index;
+
+                        av_dump_format(output_files[i], i, output_files[i]->filename, 1);
+
+                        fprintf(stderr, ""Could not find input stream matching output stream #%d.%d\n"",
+
+                                ost->file_index, ost->index);
+
+                        ffmpeg_exit(1);
+
+                    }
+
+                }
+
+            }
+
+            ist = &input_streams[ost->source_index];
+
+            ist->discard = 0;
+
+            ost->sync_ist = (nb_stream_maps > 0) ?
+
+                &input_streams[input_files[stream_maps[n].sync_file_index].ist_index +
+
+                         stream_maps[n].sync_stream_index] : ist;
+
+        }
+
+    }
+
+
+
+    /* for each output stream, we compute the right encoding parameters */
+
+    for(i=0;i<nb_ostreams;i++) {
+
+        ost = ost_table[i];
+
+        os = output_files[ost->file_index];
+
+        ist = &input_streams[ost->source_index];
+
+
+
+        codec = ost->st->codec;
+
+        icodec = ist->st->codec;
+
+
+
+        if (metadata_streams_autocopy)
+
+            av_dict_copy(&ost->st->metadata, ist->st->metadata,
+
+                         AV_DICT_DONT_OVERWRITE);
+
+
+
+        ost->st->disposition = ist->st->disposition;
+
+        codec->bits_per_raw_sample= icodec->bits_per_raw_sample;
+
+        codec->chroma_sample_location = icodec->chroma_sample_location;
+
+
+
+        if (ost->st->stream_copy) {
+
+            uint64_t extra_size = (uint64_t)icodec->extradata_size + FF_INPUT_BUFFER_PADDING_SIZE;
+
+
+
+            if (extra_size > INT_MAX)
+
+                goto fail;
+
+
+
+            /* if stream_copy is selected, no need to decode or encode */
+
+            codec->codec_id = icodec->codec_id;
+
+            codec->codec_type = icodec->codec_type;
+
+
+
+            if(!codec->codec_tag){
+
+                if(   !os->oformat->codec_tag
+
+                   || av_codec_get_id (os->oformat->codec_tag, icodec->codec_tag) == codec->codec_id
+
+                   || av_codec_get_tag(os->oformat->codec_tag, icodec->codec_id) <= 0)
+
+                    codec->codec_tag = icodec->codec_tag;
+
+            }
+
+
+
+            codec->bit_rate = icodec->bit_rate;
+
+            codec->rc_max_rate    = icodec->rc_max_rate;
+
+            codec->rc_buffer_size = icodec->rc_buffer_size;
+
+            codec->extradata= av_mallocz(extra_size);
+
+            if (!codec->extradata)
+
+                goto fail;
+
+            memcpy(codec->extradata, icodec->extradata, icodec->extradata_size);
+
+            codec->extradata_size= icodec->extradata_size;
+
+            if(!copy_tb && av_q2d(icodec->time_base)*icodec->ticks_per_frame > av_q2d(ist->st->time_base) && av_q2d(ist->st->time_base) < 1.0/500){
+
+                codec->time_base = icodec->time_base;
+
+                codec->time_base.num *= icodec->ticks_per_frame;
+
+                av_reduce(&codec->time_base.num, &codec->time_base.den,
+
+                          codec->time_base.num, codec->time_base.den, INT_MAX);
+
+            }else
+
+                codec->time_base = ist->st->time_base;
+
+            switch(codec->codec_type) {
+
+            case AVMEDIA_TYPE_AUDIO:
+
+                if(audio_volume != 256) {
+
+                    fprintf(stderr,""-acodec copy and -vol are incompatible (frames are not decoded)\n"");
+
+                    ffmpeg_exit(1);
+
+                }
+
+                codec->channel_layout = icodec->channel_layout;
+
+                codec->sample_rate = icodec->sample_rate;
+
+                codec->channels = icodec->channels;
+
+                codec->frame_size = icodec->frame_size;
+
+                codec->audio_service_type = icodec->audio_service_type;
+
+                codec->block_align= icodec->block_align;
+
+                if(codec->block_align == 1 && codec->codec_id == CODEC_ID_MP3)
+
+                    codec->block_align= 0;
+
+                if(codec->codec_id == CODEC_ID_AC3)
+
+                    codec->block_align= 0;
+
+                break;
+
+            case AVMEDIA_TYPE_VIDEO:
+
+                codec->pix_fmt = icodec->pix_fmt;
+
+                codec->width = icodec->width;
+
+                codec->height = icodec->height;
+
+                codec->has_b_frames = icodec->has_b_frames;
+
+                if (!codec->sample_aspect_ratio.num) {
+
+                    codec->sample_aspect_ratio =
+
+                    ost->st->sample_aspect_ratio =
+
+                        ist->st->sample_aspect_ratio.num ? ist->st->sample_aspect_ratio :
+
+                        ist->st->codec->sample_aspect_ratio.num ?
+
+                        ist->st->codec->sample_aspect_ratio : (AVRational){0, 1};
+
+                }
+
+                break;
+
+            case AVMEDIA_TYPE_SUBTITLE:
+
+                codec->width = icodec->width;
+
+                codec->height = icodec->height;
+
+                break;
+
+            case AVMEDIA_TYPE_DATA:
+
+                break;
+
+            default:
+
+                abort();
+
+            }
+
+        } else {
+
+            if (!ost->enc)
+
+                ost->enc = avcodec_find_encoder(ost->st->codec->codec_id);
+
+            switch(codec->codec_type) {
+
+            case AVMEDIA_TYPE_AUDIO:
+
+                ost->fifo= av_fifo_alloc(1024);
+
+                if(!ost->fifo)
+
+                    goto fail;
+
+                ost->reformat_pair = MAKE_SFMT_PAIR(AV_SAMPLE_FMT_NONE,AV_SAMPLE_FMT_NONE);
+
+                if (!codec->sample_rate) {
+
+                    codec->sample_rate = icodec->sample_rate;
+
+                    if (icodec->lowres)
+
+                        codec->sample_rate >>= icodec->lowres;
+
+                }
+
+                choose_sample_rate(ost->st, ost->enc);
+
+                codec->time_base = (AVRational){1, codec->sample_rate};
+
+                if (codec->sample_fmt == AV_SAMPLE_FMT_NONE)
+
+                    codec->sample_fmt = icodec->sample_fmt;
+
+                choose_sample_fmt(ost->st, ost->enc);
+
+                if (!codec->channels) {
+
+                    codec->channels = icodec->channels;
+
+                    codec->channel_layout = icodec->channel_layout;
+
+                }
+
+                if (av_get_channel_layout_nb_channels(codec->channel_layout) != codec->channels)
+
+                    codec->channel_layout = 0;
+
+                ost->audio_resample = codec->sample_rate != icodec->sample_rate || audio_sync_method > 1;
+
+                icodec->request_channels = codec->channels;
+
+                ist->decoding_needed = 1;
+
+                ost->encoding_needed = 1;
+
+                ost->resample_sample_fmt  = icodec->sample_fmt;
+
+                ost->resample_sample_rate = icodec->sample_rate;
+
+                ost->resample_channels    = icodec->channels;
+
+                break;
+
+            case AVMEDIA_TYPE_VIDEO:
+
+                if (codec->pix_fmt == PIX_FMT_NONE)
+
+                    codec->pix_fmt = icodec->pix_fmt;
+
+                choose_pixel_fmt(ost->st, ost->enc);
+
+
+
+                if (ost->st->codec->pix_fmt == PIX_FMT_NONE) {
+
+                    fprintf(stderr, ""Video pixel format is unknown, stream cannot be encoded\n"");
+
+                    ffmpeg_exit(1);
+
+                }
+
+                ost->video_resample = codec->width   != icodec->width  ||
+
+                                      codec->height  != icodec->height ||
+
+                                      codec->pix_fmt != icodec->pix_fmt;
+
+                if (ost->video_resample) {
+
+                    codec->bits_per_raw_sample= frame_bits_per_raw_sample;
+
+                }
+
+                if (!codec->width || !codec->height) {
+
+                    codec->width  = icodec->width;
+
+                    codec->height = icodec->height;
+
+                }
+
+                ost->resample_height = icodec->height;
+
+                ost->resample_width  = icodec->width;
+
+                ost->resample_pix_fmt= icodec->pix_fmt;
+
+                ost->encoding_needed = 1;
+
+                ist->decoding_needed = 1;
+
+
+
+                if (!ost->frame_rate.num)
+
+                    ost->frame_rate = ist->st->r_frame_rate.num ? ist->st->r_frame_rate : (AVRational){25,1};
+
+                if (ost->enc && ost->enc->supported_framerates && !force_fps) {
+
+                    int idx = av_find_nearest_q_idx(ost->frame_rate, ost->enc->supported_framerates);
+
+                    ost->frame_rate = ost->enc->supported_framerates[idx];
+
+                }
+
+                codec->time_base = (AVRational){ost->frame_rate.den, ost->frame_rate.num};
+
+                if(   av_q2d(codec->time_base) < 0.001 && video_sync_method
+
+                   && (video_sync_method==1 || (video_sync_method<0 && !(os->oformat->flags & AVFMT_VARIABLE_FPS)))){
+
+                    av_log(os, AV_LOG_WARNING, ""Frame rate very high for a muxer not effciciently supporting it.\n""
+
+                                               ""Please consider specifiying a lower framerate, a different muxer or -vsync 2\n"");
+
+                }
+
+
+
+#if CONFIG_AVFILTER
+
+                if (configure_video_filters(ist, ost)) {
+
+                    fprintf(stderr, ""Error opening filters!\n"");
+
+                    exit(1);
+
+                }
+
+#endif
+
+                break;
+
+            case AVMEDIA_TYPE_SUBTITLE:
+
+                ost->encoding_needed = 1;
+
+                ist->decoding_needed = 1;
+
+                break;
+
+            default:
+
+                abort();
+
+                break;
+
+            }
+
+            /* two pass mode */
+
+            if (ost->encoding_needed && codec->codec_id != CODEC_ID_H264 &&
+
+                (codec->flags & (CODEC_FLAG_PASS1 | CODEC_FLAG_PASS2))) {
+
+                char logfilename[1024];
+
+                FILE *f;
+
+
+
+                snprintf(logfilename, sizeof(logfilename), ""%s-%d.log"",
+
+                         pass_logfilename_prefix ? pass_logfilename_prefix : DEFAULT_PASS_LOGFILENAME_PREFIX,
+
+                         i);
+
+                if (codec->flags & CODEC_FLAG_PASS1) {
+
+                    f = fopen(logfilename, ""wb"");
+
+                    if (!f) {
+
+                        fprintf(stderr, ""Cannot write log file '%s' for pass-1 encoding: %s\n"", logfilename, strerror(errno));
+
+                        ffmpeg_exit(1);
+
+                    }
+
+                    ost->logfile = f;
+
+                } else {
+
+                    char  *logbuffer;
+
+                    size_t logbuffer_size;
+
+                    if (read_file(logfilename, &logbuffer, &logbuffer_size) < 0) {
+
+                        fprintf(stderr, ""Error reading log file '%s' for pass-2 encoding\n"", logfilename);
+
+                        ffmpeg_exit(1);
+
+                    }
+
+                    codec->stats_in = logbuffer;
+
+                }
+
+            }
+
+        }
+
+        if(codec->codec_type == AVMEDIA_TYPE_VIDEO){
+
+            /* maximum video buffer size is 6-bytes per pixel, plus DPX header size */
+
+            int size= codec->width * codec->height;
+
+            bit_buffer_size= FFMAX(bit_buffer_size, 6*size + 1664);
+
+        }
+
+    }
+
+
+
+    if (!bit_buffer)
+
+        bit_buffer = av_malloc(bit_buffer_size);
+
+    if (!bit_buffer) {
+
+        fprintf(stderr, ""Cannot allocate %d bytes output buffer\n"",
+
+                bit_buffer_size);
+
+        ret = AVERROR(ENOMEM);
+
+        goto fail;
+
+    }
+
+
+
+    /* open each encoder */
+
+    for(i=0;i<nb_ostreams;i++) {
+
+        ost = ost_table[i];
+
+        if (ost->encoding_needed) {
+
+            AVCodec *codec = ost->enc;
+
+            AVCodecContext *dec = input_streams[ost->source_index].st->codec;
+
+            if (!codec) {
+
+                snprintf(error, sizeof(error), ""Encoder (codec id %d) not found for output stream #%d.%d"",
+
+                         ost->st->codec->codec_id, ost->file_index, ost->index);
+
+                ret = AVERROR(EINVAL);
+
+                goto dump_format;
+
+            }
+
+            if (dec->subtitle_header) {
+
+                ost->st->codec->subtitle_header = av_malloc(dec->subtitle_header_size);
+
+                if (!ost->st->codec->subtitle_header) {
+
+                    ret = AVERROR(ENOMEM);
+
+                    goto dump_format;
+
+                }
+
+                memcpy(ost->st->codec->subtitle_header, dec->subtitle_header, dec->subtitle_header_size);
+
+                ost->st->codec->subtitle_header_size = dec->subtitle_header_size;
+
+            }
+
+            if (avcodec_open2(ost->st->codec, codec, &ost->opts) < 0) {
+
+                snprintf(error, sizeof(error), ""Error while opening encoder for output stream #%d.%d - maybe incorrect parameters such as bit_rate, rate, width or height"",
+
+                        ost->file_index, ost->index);
+
+                ret = AVERROR(EINVAL);
+
+                goto dump_format;
+
+            }
+
+            assert_codec_experimental(ost->st->codec, 1);
+
+            assert_avoptions(ost->opts);
+
+            if (ost->st->codec->bit_rate && ost->st->codec->bit_rate < 1000)
+
+                av_log(NULL, AV_LOG_WARNING, ""The bitrate parameter is set too low.""
+
+                                             ""It takes bits/s as argument, not kbits/s\n"");
+
+            extra_size += ost->st->codec->extradata_size;
+
+        }
+
+    }
+
+
+
+    /* open each decoder */
+
+    for (i = 0; i < nb_input_streams; i++) {
+
+        ist = &input_streams[i];
+
+        if (ist->decoding_needed) {
+
+            AVCodec *codec = ist->dec;
+
+            if (!codec)
+
+                codec = avcodec_find_decoder(ist->st->codec->codec_id);
+
+            if (!codec) {
+
+                snprintf(error, sizeof(error), ""Decoder (codec id %d) not found for input stream #%d.%d"",
+
+                        ist->st->codec->codec_id, ist->file_index, ist->st->index);
+
+                ret = AVERROR(EINVAL);
+
+                goto dump_format;
+
+            }
+
+            if (avcodec_open2(ist->st->codec, codec, &ist->opts) < 0) {
+
+                snprintf(error, sizeof(error), ""Error while opening decoder for input stream #%d.%d"",
+
+                        ist->file_index, ist->st->index);
+
+                ret = AVERROR(EINVAL);
+
+                goto dump_format;
+
+            }
+
+            assert_codec_experimental(ist->st->codec, 0);
+
+            assert_avoptions(ost->opts);
+
+            //if (ist->st->codec->codec_type == AVMEDIA_TYPE_VIDEO)
+
+            //    ist->st->codec->flags |= CODEC_FLAG_REPEAT_FIELD;
+
+        }
+
+    }
+
+
+
+    /* init pts */
+
+    for (i = 0; i < nb_input_streams; i++) {
+
+        AVStream *st;
+
+        ist = &input_streams[i];
+
+        st= ist->st;
+
+        ist->pts = st->avg_frame_rate.num ? - st->codec->has_b_frames*AV_TIME_BASE / av_q2d(st->avg_frame_rate) : 0;
+
+        ist->next_pts = AV_NOPTS_VALUE;
+
+        ist->is_start = 1;
+
+    }
+
+
+
+    /* set meta data information from input file if required */
+
+    for (i=0;i<nb_meta_data_maps;i++) {
+
+        AVFormatContext *files[2];
+
+        AVDictionary    **meta[2];
+
+        int j;
+
+
+
+#define METADATA_CHECK_INDEX(index, nb_elems, desc)\
+
+        if ((index) < 0 || (index) >= (nb_elems)) {\
+
+            snprintf(error, sizeof(error), ""Invalid %s index %d while processing metadata maps\n"",\
+
+                     (desc), (index));\
+
+            ret = AVERROR(EINVAL);\
+
+            goto dump_format;\
+
+        }
+
+
+
+        int out_file_index = meta_data_maps[i][0].file;
+
+        int in_file_index = meta_data_maps[i][1].file;
+
+        if (in_file_index < 0 || out_file_index < 0)
+
+            continue;
+
+        METADATA_CHECK_INDEX(out_file_index, nb_output_files, ""output file"")
+
+        METADATA_CHECK_INDEX(in_file_index, nb_input_files, ""input file"")
+
+
+
+        files[0] = output_files[out_file_index];
+
+        files[1] = input_files[in_file_index].ctx;
+
+
+
+        for (j = 0; j < 2; j++) {
+
+            MetadataMap *map = &meta_data_maps[i][j];
+
+
+
+            switch (map->type) {
+
+            case 'g':
+
+                meta[j] = &files[j]->metadata;
+
+                break;
+
+            case 's':
+
+                METADATA_CHECK_INDEX(map->index, files[j]->nb_streams, ""stream"")
+
+                meta[j] = &files[j]->streams[map->index]->metadata;
+
+                break;
+
+            case 'c':
+
+                METADATA_CHECK_INDEX(map->index, files[j]->nb_chapters, ""chapter"")
+
+                meta[j] = &files[j]->chapters[map->index]->metadata;
+
+                break;
+
+            case 'p':
+
+                METADATA_CHECK_INDEX(map->index, files[j]->nb_programs, ""program"")
+
+                meta[j] = &files[j]->programs[map->index]->metadata;
+
+                break;
+
+            }
+
+        }
+
+
+
+        av_dict_copy(meta[0], *meta[1], AV_DICT_DONT_OVERWRITE);
+
+    }
+
+
+
+    /* copy global metadata by default */
+
+    if (metadata_global_autocopy) {
+
+
+
+        for (i = 0; i < nb_output_files; i++)
+
+            av_dict_copy(&output_files[i]->metadata, input_files[0].ctx->metadata,
+
+                         AV_DICT_DONT_OVERWRITE);
+
+    }
+
+
+
+    /* copy chapters according to chapter maps */
+
+    for (i = 0; i < nb_chapter_maps; i++) {
+
+        int infile  = chapter_maps[i].in_file;
+
+        int outfile = chapter_maps[i].out_file;
+
+
+
+        if (infile < 0 || outfile < 0)
+
+            continue;
+
+        if (infile >= nb_input_files) {
+
+            snprintf(error, sizeof(error), ""Invalid input file index %d in chapter mapping.\n"", infile);
+
+            ret = AVERROR(EINVAL);
+
+            goto dump_format;
+
+        }
+
+        if (outfile >= nb_output_files) {
+
+            snprintf(error, sizeof(error), ""Invalid output file index %d in chapter mapping.\n"",outfile);
+
+            ret = AVERROR(EINVAL);
+
+            goto dump_format;
+
+        }
+
+        copy_chapters(infile, outfile);
+
+    }
+
+
+
+    /* copy chapters from the first input file that has them*/
+
+    if (!nb_chapter_maps)
+
+        for (i = 0; i < nb_input_files; i++) {
+
+            if (!input_files[i].ctx->nb_chapters)
+
+                continue;
+
+
+
+            for (j = 0; j < nb_output_files; j++)
+
+                if ((ret = copy_chapters(i, j)) < 0)
+
+                    goto dump_format;
+
+            break;
+
+        }
+
+
+
+    /* open files and write file headers */
+
+    for(i=0;i<nb_output_files;i++) {
+
+        os = output_files[i];
+
+        if (avformat_write_header(os, &output_opts[i]) < 0) {
+
+            snprintf(error, sizeof(error), ""Could not write header for output file #%d (incorrect codec parameters ?)"", i);
+
+            ret = AVERROR(EINVAL);
+
+            goto dump_format;
+
+        }
+
+        assert_avoptions(output_opts[i]);
+
+        if (strcmp(output_files[i]->oformat->name, ""rtp"")) {
+
+            want_sdp = 0;
+
+        }
+
+    }
+
+
+
+ dump_format:
+
+    /* dump the file output parameters - cannot be done before in case
+
+       of stream copy */
+
+    for(i=0;i<nb_output_files;i++) {
+
+        av_dump_format(output_files[i], i, output_files[i]->filename, 1);
+
+    }
+
+
+
+    /* dump the stream mapping */
+
+    if (verbose >= 0) {
+
+        fprintf(stderr, ""Stream mapping:\n"");
+
+        for(i=0;i<nb_ostreams;i++) {
+
+            ost = ost_table[i];
+
+            fprintf(stderr, ""  Stream #%d.%d -> #%d.%d"",
+
+                    input_streams[ost->source_index].file_index,
+
+                    input_streams[ost->source_index].st->index,
+
+                    ost->file_index,
+
+                    ost->index);
+
+            if (ost->sync_ist != &input_streams[ost->source_index])
+
+                fprintf(stderr, "" [sync #%d.%d]"",
+
+                        ost->sync_ist->file_index,
+
+                        ost->sync_ist->st->index);
+
+            fprintf(stderr, ""\n"");
+
+        }
+
+    }
+
+
+
+    if (ret) {
+
+        fprintf(stderr, ""%s\n"", error);
+
+        goto fail;
+
+    }
+
+
+
+    if (want_sdp) {
+
+        print_sdp(output_files, nb_output_files);
+
+    }
+
+
+
+    if (!using_stdin) {
+
+        if(verbose >= 0)
+
+            fprintf(stderr, ""Press [q] to stop, [?] for help\n"");
+
+        avio_set_interrupt_cb(decode_interrupt_cb);
+
+    }
+
+    term_init();
+
+
+
+    timer_start = av_gettime();
+
+
+
+    for(; received_sigterm == 0;) {
+
+        int file_index, ist_index;
+
+        AVPacket pkt;
+
+        double ipts_min;
+
+        double opts_min;
+
+
+
+    redo:
+
+        ipts_min= 1e100;
+
+        opts_min= 1e100;
+
+        /* if 'q' pressed, exits */
+
+        if (!using_stdin) {
+
+            if (q_pressed)
+
+                break;
+
+            /* read_key() returns 0 on EOF */
+
+            key = read_key();
+
+            if (key == 'q')
+
+                break;
+
+            if (key == '+') verbose++;
+
+            if (key == '-') verbose--;
+
+            if (key == 's') qp_hist     ^= 1;
+
+            if (key == 'h'){
+
+                if (do_hex_dump){
+
+                    do_hex_dump = do_pkt_dump = 0;
+
+                } else if(do_pkt_dump){
+
+                    do_hex_dump = 1;
+
+                } else
+
+                    do_pkt_dump = 1;
+
+                av_log_set_level(AV_LOG_DEBUG);
+
+            }
+
+            if (key == 'd' || key == 'D'){
+
+                int debug=0;
+
+                if(key == 'D') {
+
+                    debug = input_streams[0].st->codec->debug<<1;
+
+                    if(!debug) debug = 1;
+
+                    while(debug & (FF_DEBUG_DCT_COEFF|FF_DEBUG_VIS_QP|FF_DEBUG_VIS_MB_TYPE)) //unsupported, would just crash
+
+                        debug += debug;
+
+                }else
+
+                    scanf(""%d"", &debug);
+
+                for(i=0;i<nb_input_streams;i++) {
+
+                    input_streams[i].st->codec->debug = debug;
+
+                }
+
+                for(i=0;i<nb_ostreams;i++) {
+
+                    ost = ost_table[i];
+
+                    ost->st->codec->debug = debug;
+
+                }
+
+                if(debug) av_log_set_level(AV_LOG_DEBUG);
+
+                fprintf(stderr,""debug=%d\n"", debug);
+
+            }
+
+            if (key == '?'){
+
+                fprintf(stderr, ""key    function\n""
+
+                                ""?      show this help\n""
+
+                                ""+      increase verbosity\n""
+
+                                ""-      decrease verbosity\n""
+
+                                ""D      cycle through available debug modes\n""
+
+                                ""h      dump packets/hex press to cycle through the 3 states\n""
+
+                                ""q      quit\n""
+
+                                ""s      Show QP histogram\n""
+
+                );
+
+            }
+
+        }
+
+
+
+        /* select the stream that we must read now by looking at the
+
+           smallest output pts */
+
+        file_index = -1;
+
+        for(i=0;i<nb_ostreams;i++) {
+
+            double ipts, opts;
+
+            ost = ost_table[i];
+
+            os = output_files[ost->file_index];
+
+            ist = &input_streams[ost->source_index];
+
+            if(ist->is_past_recording_time || no_packet[ist->file_index])
+
+                continue;
+
+                opts = ost->st->pts.val * av_q2d(ost->st->time_base);
+
+            ipts = (double)ist->pts;
+
+            if (!input_files[ist->file_index].eof_reached){
+
+                if(ipts < ipts_min) {
+
+                    ipts_min = ipts;
+
+                    if(input_sync ) file_index = ist->file_index;
+
+                }
+
+                if(opts < opts_min) {
+
+                    opts_min = opts;
+
+                    if(!input_sync) file_index = ist->file_index;
+
+                }
+
+            }
+
+            if(ost->frame_number >= max_frames[ost->st->codec->codec_type]){
+
+                file_index= -1;
+
+                break;
+
+            }
+
+        }
+
+        /* if none, if is finished */
+
+        if (file_index < 0) {
+
+            if(no_packet_count){
+
+                no_packet_count=0;
+
+                memset(no_packet, 0, sizeof(no_packet));
+
+                usleep(10000);
+
+                continue;
+
+            }
+
+            break;
+
+        }
+
+
+
+        /* finish if limit size exhausted */
+
+        if (limit_filesize != 0 && limit_filesize <= avio_tell(output_files[0]->pb))
+
+            break;
+
+
+
+        /* read a frame from it and output it in the fifo */
+
+        is = input_files[file_index].ctx;
+
+        ret= av_read_frame(is, &pkt);
+
+        if(ret == AVERROR(EAGAIN)){
+
+            no_packet[file_index]=1;
+
+            no_packet_count++;
+
+            continue;
+
+        }
+
+        if (ret < 0) {
+
+            input_files[file_index].eof_reached = 1;
+
+            if (opt_shortest)
+
+                break;
+
+            else
+
+                continue;
+
+        }
+
+
+
+        no_packet_count=0;
+
+        memset(no_packet, 0, sizeof(no_packet));
+
+
+
+        if (do_pkt_dump) {
+
+            av_pkt_dump_log2(NULL, AV_LOG_DEBUG, &pkt, do_hex_dump,
+
+                             is->streams[pkt.stream_index]);
+
+        }
+
+        /* the following test is needed in case new streams appear
+
+           dynamically in stream : we ignore them */
+
+        if (pkt.stream_index >= input_files[file_index].ctx->nb_streams)
+
+            goto discard_packet;
+
+        ist_index = input_files[file_index].ist_index + pkt.stream_index;
+
+        ist = &input_streams[ist_index];
+
+        if (ist->discard)
+
+            goto discard_packet;
+
+
+
+        if (pkt.dts != AV_NOPTS_VALUE)
+
+            pkt.dts += av_rescale_q(input_files[ist->file_index].ts_offset, AV_TIME_BASE_Q, ist->st->time_base);
+
+        if (pkt.pts != AV_NOPTS_VALUE)
+
+            pkt.pts += av_rescale_q(input_files[ist->file_index].ts_offset, AV_TIME_BASE_Q, ist->st->time_base);
+
+
+
+        if (ist->ts_scale) {
+
+            if(pkt.pts != AV_NOPTS_VALUE)
+
+                pkt.pts *= ist->ts_scale;
+
+            if(pkt.dts != AV_NOPTS_VALUE)
+
+                pkt.dts *= ist->ts_scale;
+
+        }
+
+
+
+//        fprintf(stderr, ""next:%""PRId64"" dts:%""PRId64"" off:%""PRId64"" %d\n"", ist->next_pts, pkt.dts, input_files[ist->file_index].ts_offset, ist->st->codec->codec_type);
+
+        if (pkt.dts != AV_NOPTS_VALUE && ist->next_pts != AV_NOPTS_VALUE
+
+            && (is->iformat->flags & AVFMT_TS_DISCONT)) {
+
+            int64_t pkt_dts= av_rescale_q(pkt.dts, ist->st->time_base, AV_TIME_BASE_Q);
+
+            int64_t delta= pkt_dts - ist->next_pts;
+
+            if((FFABS(delta) > 1LL*dts_delta_threshold*AV_TIME_BASE || pkt_dts+1<ist->pts)&& !copy_ts){
+
+                input_files[ist->file_index].ts_offset -= delta;
+
+                if (verbose > 2)
+
+                    fprintf(stderr, ""timestamp discontinuity %""PRId64"", new offset= %""PRId64""\n"",
+
+                            delta, input_files[ist->file_index].ts_offset);
+
+                pkt.dts-= av_rescale_q(delta, AV_TIME_BASE_Q, ist->st->time_base);
+
+                if(pkt.pts != AV_NOPTS_VALUE)
+
+                    pkt.pts-= av_rescale_q(delta, AV_TIME_BASE_Q, ist->st->time_base);
+
+            }
+
+        }
+
+
+
+        /* finish if recording time exhausted */
+
+        if (recording_time != INT64_MAX &&
+
+            (pkt.pts != AV_NOPTS_VALUE ?
+
+                av_compare_ts(pkt.pts, ist->st->time_base, recording_time + start_time, (AVRational){1, 1000000})
+
+                    :
+
+                av_compare_ts(ist->pts, AV_TIME_BASE_Q, recording_time + start_time, (AVRational){1, 1000000})
+
+            )>= 0) {
+
+            ist->is_past_recording_time = 1;
+
+            goto discard_packet;
+
+        }
+
+
+
+        //fprintf(stderr,""read #%d.%d size=%d\n"", ist->file_index, ist->st->index, pkt.size);
+
+        if (output_packet(ist, ist_index, ost_table, nb_ostreams, &pkt) < 0) {
+
+
+
+            if (verbose >= 0)
+
+                fprintf(stderr, ""Error while decoding stream #%d.%d\n"",
+
+                        ist->file_index, ist->st->index);
+
+            if (exit_on_error)
+
+                ffmpeg_exit(1);
+
+            av_free_packet(&pkt);
+
+            goto redo;
+
+        }
+
+
+
+    discard_packet:
+
+        av_free_packet(&pkt);
+
+
+
+        /* dump report by using the output first video and audio streams */
+
+        print_report(output_files, ost_table, nb_ostreams, 0);
+
+    }
+
+
+
+    /* at the end of stream, we must flush the decoder buffers */
+
+    for (i = 0; i < nb_input_streams; i++) {
+
+        ist = &input_streams[i];
+
+        if (ist->decoding_needed) {
+
+            output_packet(ist, i, ost_table, nb_ostreams, NULL);
+
+        }
+
+    }
+
+
+
+    term_exit();
+
+
+
+    /* write the trailer if needed and close file */
+
+    for(i=0;i<nb_output_files;i++) {
+
+        os = output_files[i];
+
+        av_write_trailer(os);
+
+    }
+
+
+
+    /* dump report by using the first video and audio streams */
+
+    print_report(output_files, ost_table, nb_ostreams, 1);
+
+
+
+    /* close each encoder */
+
+    for(i=0;i<nb_ostreams;i++) {
+
+        ost = ost_table[i];
+
+        if (ost->encoding_needed) {
+
+            av_freep(&ost->st->codec->stats_in);
+
+            avcodec_close(ost->st->codec);
+
+        }
+
+#if CONFIG_AVFILTER
+
+        avfilter_graph_free(&ost->graph);
+
+#endif
+
+    }
+
+
+
+    /* close each decoder */
+
+    for (i = 0; i < nb_input_streams; i++) {
+
+        ist = &input_streams[i];
+
+        if (ist->decoding_needed) {
+
+            avcodec_close(ist->st->codec);
+
+        }
+
+    }
+
+
+
+    /* finished ! */
+
+    ret = 0;
+
+
+
+ fail:
+
+    av_freep(&bit_buffer);
+
+
+
+    if (ost_table) {
+
+        for(i=0;i<nb_ostreams;i++) {
+
+            ost = ost_table[i];
+
+            if (ost) {
+
+                if (ost->st->stream_copy)
+
+                    av_freep(&ost->st->codec->extradata);
+
+                if (ost->logfile) {
+
+                    fclose(ost->logfile);
+
+                    ost->logfile = NULL;
+
+                }
+
+                av_fifo_free(ost->fifo); /* works even if fifo is not
+
+                                             initialized but set to zero */
+
+                av_freep(&ost->st->codec->subtitle_header);
+
+                av_free(ost->resample_frame.data[0]);
+
+                av_free(ost->forced_kf_pts);
+
+                if (ost->video_resample)
+
+                    sws_freeContext(ost->img_resample_ctx);
+
+                if (ost->resample)
+
+                    audio_resample_close(ost->resample);
+
+                if (ost->reformat_ctx)
+
+                    av_audio_convert_free(ost->reformat_ctx);
+
+                av_dict_free(&ost->opts);
+
+                av_free(ost);
+
+            }
+
+        }
+
+        av_free(ost_table);
+
+    }
+
+    return ret;
+
+}"
+"static void v4l2_free_buffer(void *opaque, uint8_t *unused)
+
+{
+
+    V4L2Buffer* avbuf = opaque;
+
+    V4L2m2mContext *s = buf_to_m2mctx(avbuf);
+
+
+
+    if (atomic_fetch_sub(&avbuf->context_refcount, 1) == 1) {
+
+        atomic_fetch_sub_explicit(&s->refcount, 1, memory_order_acq_rel);
+
+
+
+        if (s->reinit) {
+
+            if (!atomic_load(&s->refcount))
+
+                sem_post(&s->refsync);
+
+        } else if (avbuf->context->streamon)
+
+            ff_v4l2_buffer_enqueue(avbuf);
+
+
+
+        av_buffer_unref(&avbuf->context_ref);
+
+    }
+
+}"
+"int ff_get_wav_header(AVFormatContext *s, AVIOContext *pb,
+
+                      AVCodecContext *codec, int size, int big_endian)
+
+{
+
+    int id;
+
+    uint64_t bitrate;
+
+
+
+    if (size < 14) {
+
+        avpriv_request_sample(codec, ""wav header size < 14"");
+
+        return AVERROR_INVALIDDATA;
+
+    }
+
+
+
+    codec->codec_type  = AVMEDIA_TYPE_AUDIO;
+
+    if (!big_endian) {
+
+        id                 = avio_rl16(pb);
+
+        if (id != 0x0165) {
+
+            codec->channels    = avio_rl16(pb);
+
+            codec->sample_rate = avio_rl32(pb);
+
+            bitrate            = avio_rl32(pb) * 8LL;
+
+            codec->block_align = avio_rl16(pb);
+
+        }
+
+    } else {
+
+        id                 = avio_rb16(pb);
+
+        codec->channels    = avio_rb16(pb);
+
+        codec->sample_rate = avio_rb32(pb);
+
+        bitrate            = avio_rb32(pb) * 8LL;
+
+        codec->block_align = avio_rb16(pb);
+
+    }
+
+    if (size == 14) {  /* We're dealing with plain vanilla WAVEFORMAT */
+
+        codec->bits_per_coded_sample = 8;
+
+    } else {
+
+        if (!big_endian) {
+
+            codec->bits_per_coded_sample = avio_rl16(pb);
+
+        } else {
+
+            codec->bits_per_coded_sample = avio_rb16(pb);
+
+        }
+
+    }
+
+    if (id == 0xFFFE) {
+
+        codec->codec_tag = 0;
+
+    } else {
+
+        codec->codec_tag = id;
+
+        codec->codec_id  = ff_wav_codec_get_id(id,
+
+                                               codec->bits_per_coded_sample);
+
+    }
+
+    if (size >= 18 && id != 0x0165) {  /* We're obviously dealing with WAVEFORMATEX */
+
+        int cbSize = avio_rl16(pb); /* cbSize */
+
+        if (big_endian) {
+
+            avpriv_report_missing_feature(codec, ""WAVEFORMATEX support for RIFX files\n"");
+
+            return AVERROR_PATCHWELCOME;
+
+        }
+
+        size  -= 18;
+
+        cbSize = FFMIN(size, cbSize);
+
+        if (cbSize >= 22 && id == 0xfffe) { /* WAVEFORMATEXTENSIBLE */
+
+            parse_waveformatex(pb, codec);
+
+            cbSize -= 22;
+
+            size   -= 22;
+
+        }
+
+        if (cbSize > 0) {
+
+            av_freep(&codec->extradata);
+
+            if (ff_get_extradata(codec, pb, cbSize) < 0)
+
+                return AVERROR(ENOMEM);
+
+            size -= cbSize;
+
+        }
+
+
+
+        /* It is possible for the chunk to contain garbage at the end */
+
+        if (size > 0)
+
+            avio_skip(pb, size);
+
+    } else if (id == 0x0165 && size >= 32) {
+
+        int nb_streams, i;
+
+
+
+        size -= 4;
+
+        av_freep(&codec->extradata);
+
+        if (ff_get_extradata(codec, pb, size) < 0)
+
+            return AVERROR(ENOMEM);
+
+        nb_streams         = AV_RL16(codec->extradata + 4);
+
+        codec->sample_rate = AV_RL32(codec->extradata + 12);
+
+        codec->channels    = 0;
+
+        bitrate            = 0;
+
+        if (size < 8 + nb_streams * 20)
+
+            return AVERROR_INVALIDDATA;
+
+        for (i = 0; i < nb_streams; i++)
+
+            codec->channels += codec->extradata[8 + i * 20 + 17];
+
+    }
+
+
+
+    if (bitrate > INT_MAX) {
+
+        if (s->error_recognition & AV_EF_EXPLODE) {
+
+            av_log(s, AV_LOG_ERROR,
+
+                   ""The bitrate %""PRIu64"" is too large.\n"",
+
+                    bitrate);
+
+            return AVERROR_INVALIDDATA;
+
+        } else {
+
+            av_log(s, AV_LOG_WARNING,
+
+                   ""The bitrate %""PRIu64"" is too large, resetting to 0."",
+
+                   bitrate);
+
+            codec->bit_rate = 0;
+
+        }
+
+    } else {
+
+        codec->bit_rate = bitrate;
+
+    }
+
+
+
+    if (codec->sample_rate <= 0) {
+
+        av_log(s, AV_LOG_ERROR,
+
+               ""Invalid sample rate: %d\n"", codec->sample_rate);
+
+        return AVERROR_INVALIDDATA;
+
+    }
+
+    if (codec->codec_id == AV_CODEC_ID_AAC_LATM) {
+
+        /* Channels and sample_rate values are those prior to applying SBR
+
+         * and/or PS. */
+
+        codec->channels    = 0;
+
+        codec->sample_rate = 0;
+
+    }
+
+    /* override bits_per_coded_sample for G.726 */
+
+    if (codec->codec_id == AV_CODEC_ID_ADPCM_G726 && codec->sample_rate)
+
+        codec->bits_per_coded_sample = codec->bit_rate / codec->sample_rate;
+
+
+
+    return 0;
+
+}"
+"int av_opencl_buffer_write(cl_mem dst_cl_buf, uint8_t *src_buf, size_t buf_size)
+
+{
+
+    cl_int status;
+
+    void *mapped = clEnqueueMapBuffer(gpu_env.command_queue, dst_cl_buf,
+
+                                      CL_TRUE,CL_MAP_WRITE, 0, sizeof(uint8_t) * buf_size,
+
+                                      0, NULL, NULL, &status);
+
+
+
+    if (status != CL_SUCCESS) {
+
+        av_log(&openclutils, AV_LOG_ERROR, ""Could not map OpenCL buffer: %s\n"", opencl_errstr(status));
+
+        return AVERROR_EXTERNAL;
+
+    }
+
+    memcpy(mapped, src_buf, buf_size);
+
+
+
+    status = clEnqueueUnmapMemObject(gpu_env.command_queue, dst_cl_buf, mapped, 0, NULL, NULL);
+
+    if (status != CL_SUCCESS) {
+
+        av_log(&openclutils, AV_LOG_ERROR, ""Could not unmap OpenCL buffer: %s\n"", opencl_errstr(status));
+
+        return AVERROR_EXTERNAL;
+
+    }
+
+    return 0;
+
+}"
+"static int r3d_read_rdvo(AVFormatContext *s, Atom *atom)
+
+{
+
+    R3DContext *r3d = s->priv_data;
+
+    AVStream *st = s->streams[0];
+
+    int i;
+
+
+
+    r3d->video_offsets_count = (atom->size - 8) / 4;
+
+    r3d->video_offsets = av_malloc(atom->size);
+
+    if (!r3d->video_offsets)
+
+        return AVERROR(ENOMEM);
+
+
+
+    for (i = 0; i < r3d->video_offsets_count; i++) {
+
+        r3d->video_offsets[i] = avio_rb32(s->pb);
+
+        if (!r3d->video_offsets[i]) {
+
+            r3d->video_offsets_count = i;
+
+            break;
+
+        }
+
+        av_dlog(s, ""video offset %d: %#x\n"", i, r3d->video_offsets[i]);
+
+    }
+
+
+
+    if (st->r_frame_rate.num)
+
+        st->duration = av_rescale_q(r3d->video_offsets_count,
+
+                                    (AVRational){st->r_frame_rate.den,
+
+                                                 st->r_frame_rate.num},
+
+                                    st->time_base);
+
+    av_dlog(s, ""duration %""PRId64""\n"", st->duration);
+
+
+
+    return 0;
+
+}"
+"static int dds_decode(AVCodecContext *avctx, void *data,
+
+                      int *got_frame, AVPacket *avpkt)
+
+{
+
+    DDSContext *ctx = avctx->priv_data;
+
+    GetByteContext *gbc = &ctx->gbc;
+
+    AVFrame *frame = data;
+
+    int mipmap;
+
+    int ret;
+
+
+
+    ff_texturedsp_init(&ctx->texdsp);
+
+    bytestream2_init(gbc, avpkt->data, avpkt->size);
+
+
+
+    if (bytestream2_get_bytes_left(gbc) < 128) {
+
+        av_log(avctx, AV_LOG_ERROR, ""Frame is too small (%d).\n"",
+
+               bytestream2_get_bytes_left(gbc));
+
+        return AVERROR_INVALIDDATA;
+
+    }
+
+
+
+    if (bytestream2_get_le32(gbc) != MKTAG('D', 'D', 'S', ' ') ||
+
+        bytestream2_get_le32(gbc) != 124) { // header size
+
+        av_log(avctx, AV_LOG_ERROR, ""Invalid DDS header.\n"");
+
+        return AVERROR_INVALIDDATA;
+
+    }
+
+
+
+    bytestream2_skip(gbc, 4); // flags
+
+
+
+    avctx->height = bytestream2_get_le32(gbc);
+
+    avctx->width  = bytestream2_get_le32(gbc);
+
+    ret = av_image_check_size(avctx->width, avctx->height, 0, avctx);
+
+    if (ret < 0) {
+
+        av_log(avctx, AV_LOG_ERROR, ""Invalid image size %dx%d.\n"",
+
+               avctx->width, avctx->height);
+
+        return ret;
+
+    }
+
+
+
+    /* Since codec is based on 4x4 blocks, size is aligned to 4. */
+
+    avctx->coded_width  = FFALIGN(avctx->width,  TEXTURE_BLOCK_W);
+
+    avctx->coded_height = FFALIGN(avctx->height, TEXTURE_BLOCK_H);
+
+
+
+    bytestream2_skip(gbc, 4); // pitch
+
+    bytestream2_skip(gbc, 4); // depth
+
+    mipmap = bytestream2_get_le32(gbc);
+
+    if (mipmap != 0)
+
+        av_log(avctx, AV_LOG_VERBOSE, ""Found %d mipmaps (ignored).\n"", mipmap);
+
+
+
+    /* Extract pixel format information, considering additional elements
+
+     * in reserved1 and reserved2. */
+
+    ret = parse_pixel_format(avctx);
+
+    if (ret < 0)
+
+        return ret;
+
+
+
+    ret = ff_get_buffer(avctx, frame, 0);
+
+    if (ret < 0)
+
+        return ret;
+
+
+
+    if (ctx->compressed) {
+
+        int size = (avctx->coded_height / TEXTURE_BLOCK_H) *
+
+                   (avctx->coded_width / TEXTURE_BLOCK_W) * ctx->tex_ratio;
+
+        ctx->slice_count = av_clip(avctx->thread_count, 1,
+
+                                   avctx->coded_height / TEXTURE_BLOCK_H);
+
+
+
+        if (bytestream2_get_bytes_left(gbc) < size) {
+
+            av_log(avctx, AV_LOG_ERROR,
+
+                   ""Compressed Buffer is too small (%d < %d).\n"",
+
+                   bytestream2_get_bytes_left(gbc), size);
+
+            return AVERROR_INVALIDDATA;
+
+        }
+
+
+
+        /* Use the decompress function on the texture, one block per thread. */
+
+        ctx->tex_data = gbc->buffer;
+
+        avctx->execute2(avctx, decompress_texture_thread, frame, NULL, ctx->slice_count);
+
+    } else if (!ctx->paletted && ctx->bpp == 4 && avctx->pix_fmt == AV_PIX_FMT_PAL8) {
+
+        uint8_t *dst = frame->data[0];
+
+        int x, y, i;
+
+
+
+        /* Use the first 64 bytes as palette, then copy the rest. */
+
+        bytestream2_get_buffer(gbc, frame->data[1], 16 * 4);
+
+        for (i = 0; i < 16; i++) {
+
+            AV_WN32(frame->data[1] + i*4,
+
+                    (frame->data[1][2+i*4]<<0)+
+
+                    (frame->data[1][1+i*4]<<8)+
+
+                    (frame->data[1][0+i*4]<<16)+
+
+                    (frame->data[1][3+i*4]<<24)
+
+            );
+
+        }
+
+        frame->palette_has_changed = 1;
+
+
+
+        if (bytestream2_get_bytes_left(gbc) < frame->height * frame->width / 2) {
+
+            av_log(avctx, AV_LOG_ERROR, ""Buffer is too small (%d < %d).\n"",
+
+                   bytestream2_get_bytes_left(gbc), frame->height * frame->width / 2);
+
+            return AVERROR_INVALIDDATA;
+
+        }
+
+
+
+        for (y = 0; y < frame->height; y++) {
+
+            for (x = 0; x < frame->width; x += 2) {
+
+                uint8_t val = bytestream2_get_byte(gbc);
+
+                dst[x    ] = val & 0xF;
+
+                dst[x + 1] = val >> 4;
+
+            }
+
+            dst += frame->linesize[0];
+
+        }
+
+    } else {
+
+        int linesize = av_image_get_linesize(avctx->pix_fmt, frame->width, 0);
+
+
+
+        if (ctx->paletted) {
+
+            int i;
+
+            /* Use the first 1024 bytes as palette, then copy the rest. */
+
+            bytestream2_get_buffer(gbc, frame->data[1], 256 * 4);
+
+            for (i = 0; i < 256; i++)
+
+                AV_WN32(frame->data[1] + i*4,
+
+                        (frame->data[1][2+i*4]<<0)+
+
+                        (frame->data[1][1+i*4]<<8)+
+
+                        (frame->data[1][0+i*4]<<16)+
+
+                        (frame->data[1][3+i*4]<<24)
+
+                );
+
+
+
+            frame->palette_has_changed = 1;
+
+        }
+
+
+
+        if (bytestream2_get_bytes_left(gbc) < frame->height * linesize) {
+
+            av_log(avctx, AV_LOG_ERROR, ""Buffer is too small (%d < %d).\n"",
+
+                   bytestream2_get_bytes_left(gbc), frame->height * linesize);
+
+            return AVERROR_INVALIDDATA;
+
+        }
+
+
+
+        av_image_copy_plane(frame->data[0], frame->linesize[0],
+
+                            gbc->buffer, linesize,
+
+                            linesize, frame->height);
+
+    }
+
+
+
+    /* Run any post processing here if needed. */
+
+    if (ctx->postproc != DDS_NONE)
+
+        run_postproc(avctx, frame);
+
+
+
+    /* Frame is ready to be output. */
+
+    frame->pict_type = AV_PICTURE_TYPE_I;
+
+    frame->key_frame = 1;
+
+    *got_frame = 1;
+
+
+
+    return avpkt->size;
+
+}"
+"static void check_lowpass_line(int depth){
+
+    LOCAL_ALIGNED_32(uint8_t, src,     [SRC_SIZE]);
+
+    LOCAL_ALIGNED_32(uint8_t, dst_ref, [WIDTH_PADDED]);
+
+    LOCAL_ALIGNED_32(uint8_t, dst_new, [WIDTH_PADDED]);
+
+    int w = WIDTH;
+
+    int mref = WIDTH_PADDED * -1;
+
+    int pref = WIDTH_PADDED;
+
+    int i, depth_byte;
+
+    InterlaceContext s;
+
+
+
+    declare_func(void, uint8_t *dstp, ptrdiff_t linesize, const uint8_t *srcp,
+
+                 ptrdiff_t mref, ptrdiff_t pref, int clip_max);
+
+
+
+    s.lowpass = 1;
+
+    s.lowpass = VLPF_LIN;
+
+    depth_byte = depth >> 3;
+
+    w /= depth_byte;
+
+
+
+    memset(src,     0, SRC_SIZE);
+
+    memset(dst_ref, 0, WIDTH_PADDED);
+
+    memset(dst_new, 0, WIDTH_PADDED);
+
+    randomize_buffers(src, SRC_SIZE);
+
+
+
+    ff_interlace_init(&s, depth);
+
+
+
+    if (check_func(s.lowpass_line, ""lowpass_line_%d"", depth)) {
+
+        for (i = 0; i < 32; i++) { /* simulate crop */
+
+            call_ref(dst_ref, w, src + WIDTH_PADDED, mref - i*depth_byte, pref, 0);
+
+            call_new(dst_new, w, src + WIDTH_PADDED, mref - i*depth_byte, pref, 0);
+
+            if (memcmp(dst_ref, dst_new, WIDTH - i))
+
+                fail();
+
+        }
+
+        bench_new(dst_new, w, src + WIDTH_PADDED, mref, pref, 0);
+
+    }
+
+}"
+"static void filter_mirror_setup(NetFilterState *nf, Error **errp)
+{
+    MirrorState *s = FILTER_MIRROR(nf);
+    Chardev *chr;
+    chr = qemu_chr_find(s->outdev);
+    if (chr == NULL) {
+        error_set(errp, ERROR_CLASS_DEVICE_NOT_FOUND,
+                  ""Device '%s' not found"", s->outdev);
+    qemu_chr_fe_init(&s->chr_out, chr, errp);"
+"static void test_init(TestData *d)
+
+{
+
+    QPCIBus *bus;
+
+    QTestState *qs;
+
+    char *s;
+
+
+
+    s = g_strdup_printf(""-machine q35 %s %s"",
+
+                        d->noreboot ? """" : ""-global ICH9-LPC.noreboot=false"",
+
+                        !d->args ? """" : d->args);
+
+    qs = qtest_start(s);
+
+    qtest_irq_intercept_in(qs, ""ioapic"");
+
+    g_free(s);
+
+
+
+    bus = qpci_init_pc(NULL);
+
+    d->dev = qpci_device_find(bus, QPCI_DEVFN(0x1f, 0x00));
+
+    g_assert(d->dev != NULL);
+
+
+
+    qpci_device_enable(d->dev);
+
+
+
+    /* set ACPI PM I/O space base address */
+
+    qpci_config_writel(d->dev, ICH9_LPC_PMBASE, PM_IO_BASE_ADDR | 0x1);
+
+    /* enable ACPI I/O */
+
+    qpci_config_writeb(d->dev, ICH9_LPC_ACPI_CTRL, 0x80);
+
+    /* set Root Complex BAR */
+
+    qpci_config_writel(d->dev, ICH9_LPC_RCBA, RCBA_BASE_ADDR | 0x1);
+
+
+
+    d->tco_io_base = qpci_legacy_iomap(d->dev, PM_IO_BASE_ADDR + 0x60);
+
+}"
+"static inline int64_t sub64(const int64_t a, const int64_t b)
+
+{
+
+	return a - b;
+
+}"
+"void assert_avoptions(AVDictionary *m)
+
+{
+
+    AVDictionaryEntry *t;
+
+    if ((t = av_dict_get(m, """", NULL, AV_DICT_IGNORE_SUFFIX))) {
+
+        av_log(NULL, AV_LOG_FATAL, ""Option %s not found.\n"", t->key);
+
+        exit(1);
+
+    }
+
+}"
+"static int xen_9pfs_connect(struct XenDevice *xendev)
+
+{
+
+    int i;
+
+    Xen9pfsDev *xen_9pdev = container_of(xendev, Xen9pfsDev, xendev);
+
+    V9fsState *s = &xen_9pdev->state;
+
+    QemuOpts *fsdev;
+
+
+
+    if (xenstore_read_fe_int(&xen_9pdev->xendev, ""num-rings"",
+
+                             &xen_9pdev->num_rings) == -1 ||
+
+        xen_9pdev->num_rings > MAX_RINGS || xen_9pdev->num_rings < 1) {
+
+        return -1;
+
+    }
+
+
+
+    xen_9pdev->rings = g_malloc0(xen_9pdev->num_rings * sizeof(Xen9pfsRing));
+
+    for (i = 0; i < xen_9pdev->num_rings; i++) {
+
+        char *str;
+
+        int ring_order;
+
+
+
+        xen_9pdev->rings[i].priv = xen_9pdev;
+
+        xen_9pdev->rings[i].evtchn = -1;
+
+        xen_9pdev->rings[i].local_port = -1;
+
+
+
+        str = g_strdup_printf(""ring-ref%u"", i);
+
+        if (xenstore_read_fe_int(&xen_9pdev->xendev, str,
+
+                                 &xen_9pdev->rings[i].ref) == -1) {
+
+
+            goto out;
+
+        }
+
+
+        str = g_strdup_printf(""event-channel-%u"", i);
+
+        if (xenstore_read_fe_int(&xen_9pdev->xendev, str,
+
+                                 &xen_9pdev->rings[i].evtchn) == -1) {
+
+
+            goto out;
+
+        }
+
+
+
+
+        xen_9pdev->rings[i].intf =  xengnttab_map_grant_ref(
+
+                xen_9pdev->xendev.gnttabdev,
+
+                xen_9pdev->xendev.dom,
+
+                xen_9pdev->rings[i].ref,
+
+                PROT_READ | PROT_WRITE);
+
+        if (!xen_9pdev->rings[i].intf) {
+
+            goto out;
+
+        }
+
+        ring_order = xen_9pdev->rings[i].intf->ring_order;
+
+        if (ring_order > MAX_RING_ORDER) {
+
+            goto out;
+
+        }
+
+        xen_9pdev->rings[i].ring_order = ring_order;
+
+        xen_9pdev->rings[i].data = xengnttab_map_domain_grant_refs(
+
+                xen_9pdev->xendev.gnttabdev,
+
+                (1 << ring_order),
+
+                xen_9pdev->xendev.dom,
+
+                xen_9pdev->rings[i].intf->ref,
+
+                PROT_READ | PROT_WRITE);
+
+        if (!xen_9pdev->rings[i].data) {
+
+            goto out;
+
+        }
+
+        xen_9pdev->rings[i].ring.in = xen_9pdev->rings[i].data;
+
+        xen_9pdev->rings[i].ring.out = xen_9pdev->rings[i].data +
+
+                                       XEN_FLEX_RING_SIZE(ring_order);
+
+
+
+        xen_9pdev->rings[i].bh = qemu_bh_new(xen_9pfs_bh, &xen_9pdev->rings[i]);
+
+        xen_9pdev->rings[i].out_cons = 0;
+
+        xen_9pdev->rings[i].out_size = 0;
+
+        xen_9pdev->rings[i].inprogress = false;
+
+
+
+
+
+        xen_9pdev->rings[i].evtchndev = xenevtchn_open(NULL, 0);
+
+        if (xen_9pdev->rings[i].evtchndev == NULL) {
+
+            goto out;
+
+        }
+
+        fcntl(xenevtchn_fd(xen_9pdev->rings[i].evtchndev), F_SETFD, FD_CLOEXEC);
+
+        xen_9pdev->rings[i].local_port = xenevtchn_bind_interdomain
+
+                                            (xen_9pdev->rings[i].evtchndev,
+
+                                             xendev->dom,
+
+                                             xen_9pdev->rings[i].evtchn);
+
+        if (xen_9pdev->rings[i].local_port == -1) {
+
+            xen_pv_printf(xendev, 0,
+
+                          ""xenevtchn_bind_interdomain failed port=%d\n"",
+
+                          xen_9pdev->rings[i].evtchn);
+
+            goto out;
+
+        }
+
+        xen_pv_printf(xendev, 2, ""bind evtchn port %d\n"", xendev->local_port);
+
+        qemu_set_fd_handler(xenevtchn_fd(xen_9pdev->rings[i].evtchndev),
+
+                xen_9pfs_evtchn_event, NULL, &xen_9pdev->rings[i]);
+
+    }
+
+
+
+    xen_9pdev->security_model = xenstore_read_be_str(xendev, ""security_model"");
+
+    xen_9pdev->path = xenstore_read_be_str(xendev, ""path"");
+
+    xen_9pdev->id = s->fsconf.fsdev_id =
+
+        g_strdup_printf(""xen9p%d"", xendev->dev);
+
+    xen_9pdev->tag = s->fsconf.tag = xenstore_read_fe_str(xendev, ""tag"");
+
+    v9fs_register_transport(s, &xen_9p_transport);
+
+    fsdev = qemu_opts_create(qemu_find_opts(""fsdev""),
+
+            s->fsconf.tag,
+
+            1, NULL);
+
+    qemu_opt_set(fsdev, ""fsdriver"", ""local"", NULL);
+
+    qemu_opt_set(fsdev, ""path"", xen_9pdev->path, NULL);
+
+    qemu_opt_set(fsdev, ""security_model"", xen_9pdev->security_model, NULL);
+
+    qemu_opts_set_id(fsdev, s->fsconf.fsdev_id);
+
+    qemu_fsdev_add(fsdev);
+
+    v9fs_device_realize_common(s, NULL);
+
+
+
+    return 0;
+
+
+
+out:
+
+    xen_9pfs_free(xendev);
+
+    return -1;
+
+}"
+"static void nbd_refresh_filename(BlockDriverState *bs, QDict *options)
+
+{
+
+    BDRVNBDState *s = bs->opaque;
+
+    QDict *opts = qdict_new();
+
+    QObject *saddr_qdict;
+
+    Visitor *ov;
+
+    const char *host = NULL, *port = NULL, *path = NULL;
+
+
+
+    if (s->saddr->type == SOCKET_ADDRESS_KIND_INET) {
+
+        const InetSocketAddress *inet = s->saddr->u.inet.data;
+
+        if (!inet->has_ipv4 && !inet->has_ipv6 && !inet->has_to) {
+
+            host = inet->host;
+
+            port = inet->port;
+
+        }
+
+    } else if (s->saddr->type == SOCKET_ADDRESS_KIND_UNIX) {
+
+        path = s->saddr->u.q_unix.data->path;
+
+    }
+
+
+
+    qdict_put(opts, ""driver"", qstring_from_str(""nbd""));
+
+
+
+    if (path && s->export) {
+
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+
+                 ""nbd+unix:///%s?socket=%s"", s->export, path);
+
+    } else if (path && !s->export) {
+
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+
+                 ""nbd+unix://?socket=%s"", path);
+
+    } else if (host && s->export) {
+
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+
+                 ""nbd://%s:%s/%s"", host, port, s->export);
+
+    } else if (host && !s->export) {
+
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+
+                 ""nbd://%s:%s"", host, port);
+
+    }
+
+
+
+    ov = qobject_output_visitor_new(&saddr_qdict);
+
+    visit_type_SocketAddress(ov, NULL, &s->saddr, &error_abort);
+
+    visit_complete(ov, &saddr_qdict);
+
+
+    assert(qobject_type(saddr_qdict) == QTYPE_QDICT);
+
+
+
+    qdict_put_obj(opts, ""server"", saddr_qdict);
+
+
+
+    if (s->export) {
+
+        qdict_put(opts, ""export"", qstring_from_str(s->export));
+
+    }
+
+    if (s->tlscredsid) {
+
+        qdict_put(opts, ""tls-creds"", qstring_from_str(s->tlscredsid));
+
+    }
+
+
+
+    qdict_flatten(opts);
+
+    bs->full_open_options = opts;
+
+}"
+"int net_init_tap(QemuOpts *opts, const char *name, VLANState *vlan)
+
+{
+
+    const char *ifname;
+
+
+
+    ifname = qemu_opt_get(opts, ""ifname"");
+
+
+
+    if (!ifname) {
+
+        error_report(""tap: no interface name"");
+
+        return -1;
+
+    }
+
+
+
+    if (tap_win32_init(vlan, ""tap"", name, ifname) == -1) {
+
+        return -1;
+
+    }
+
+
+
+    return 0;
+
+}"
+"void fw_cfg_add_callback(FWCfgState *s, uint16_t key, FWCfgCallback callback,
+
+                         void *callback_opaque, uint8_t *data, size_t len)
+
+{
+
+    int arch = !!(key & FW_CFG_ARCH_LOCAL);
+
+
+
+    assert(key & FW_CFG_WRITE_CHANNEL);
+
+
+
+    key &= FW_CFG_ENTRY_MASK;
+
+
+
+    assert(key < FW_CFG_MAX_ENTRY && len <= 65535);
+
+
+
+    s->entries[arch][key].data = data;
+
+    s->entries[arch][key].len = len;
+
+    s->entries[arch][key].callback_opaque = callback_opaque;
+
+    s->entries[arch][key].callback = callback;
+
+}"
+"print_insn (bfd_vma pc, disassemble_info *info)
+
+{
+
+  const struct dis386 *dp;
+
+  int i;
+
+  char *op_txt[MAX_OPERANDS];
+
+  int needcomma;
+
+  unsigned char uses_DATA_prefix, uses_LOCK_prefix;
+
+  unsigned char uses_REPNZ_prefix, uses_REPZ_prefix;
+
+  int sizeflag;
+
+  const char *p;
+
+  struct dis_private priv;
+
+  unsigned char op;
+
+  unsigned char threebyte;
+
+
+
+  if (info->mach == bfd_mach_x86_64_intel_syntax
+
+      || info->mach == bfd_mach_x86_64)
+
+    address_mode = mode_64bit;
+
+  else
+
+    address_mode = mode_32bit;
+
+
+
+  if (intel_syntax == (char) -1)
+
+    intel_syntax = (info->mach == bfd_mach_i386_i386_intel_syntax
+
+		    || info->mach == bfd_mach_x86_64_intel_syntax);
+
+
+
+  if (info->mach == bfd_mach_i386_i386
+
+      || info->mach == bfd_mach_x86_64
+
+      || info->mach == bfd_mach_i386_i386_intel_syntax
+
+      || info->mach == bfd_mach_x86_64_intel_syntax)
+
+    priv.orig_sizeflag = AFLAG | DFLAG;
+
+  else if (info->mach == bfd_mach_i386_i8086)
+
+    priv.orig_sizeflag = 0;
+
+  else
+
+    abort ();
+
+
+
+  for (p = info->disassembler_options; p != NULL; )
+
+    {
+
+      if (strncmp (p, ""x86-64"", 6) == 0)
+
+	{
+
+	  address_mode = mode_64bit;
+
+	  priv.orig_sizeflag = AFLAG | DFLAG;
+
+	}
+
+      else if (strncmp (p, ""i386"", 4) == 0)
+
+	{
+
+	  address_mode = mode_32bit;
+
+	  priv.orig_sizeflag = AFLAG | DFLAG;
+
+	}
+
+      else if (strncmp (p, ""i8086"", 5) == 0)
+
+	{
+
+	  address_mode = mode_16bit;
+
+	  priv.orig_sizeflag = 0;
+
+	}
+
+      else if (strncmp (p, ""intel"", 5) == 0)
+
+	{
+
+	  intel_syntax = 1;
+
+	}
+
+      else if (strncmp (p, ""att"", 3) == 0)
+
+	{
+
+	  intel_syntax = 0;
+
+	}
+
+      else if (strncmp (p, ""addr"", 4) == 0)
+
+	{
+
+	  if (address_mode == mode_64bit)
+
+	    {
+
+	      if (p[4] == '3' && p[5] == '2')
+
+		priv.orig_sizeflag &= ~AFLAG;
+
+	      else if (p[4] == '6' && p[5] == '4')
+
+		priv.orig_sizeflag |= AFLAG;
+
+	    }
+
+	  else
+
+	    {
+
+	      if (p[4] == '1' && p[5] == '6')
+
+		priv.orig_sizeflag &= ~AFLAG;
+
+	      else if (p[4] == '3' && p[5] == '2')
+
+		priv.orig_sizeflag |= AFLAG;
+
+	    }
+
+	}
+
+      else if (strncmp (p, ""data"", 4) == 0)
+
+	{
+
+	  if (p[4] == '1' && p[5] == '6')
+
+	    priv.orig_sizeflag &= ~DFLAG;
+
+	  else if (p[4] == '3' && p[5] == '2')
+
+	    priv.orig_sizeflag |= DFLAG;
+
+	}
+
+      else if (strncmp (p, ""suffix"", 6) == 0)
+
+	priv.orig_sizeflag |= SUFFIX_ALWAYS;
+
+
+
+      p = strchr (p, ',');
+
+      if (p != NULL)
+
+	p++;
+
+    }
+
+
+
+  if (intel_syntax)
+
+    {
+
+      names64 = intel_names64;
+
+      names32 = intel_names32;
+
+      names16 = intel_names16;
+
+      names8 = intel_names8;
+
+      names8rex = intel_names8rex;
+
+      names_seg = intel_names_seg;
+
+      index16 = intel_index16;
+
+      open_char = '[';
+
+      close_char = ']';
+
+      separator_char = '+';
+
+      scale_char = '*';
+
+    }
+
+  else
+
+    {
+
+      names64 = att_names64;
+
+      names32 = att_names32;
+
+      names16 = att_names16;
+
+      names8 = att_names8;
+
+      names8rex = att_names8rex;
+
+      names_seg = att_names_seg;
+
+      index16 = att_index16;
+
+      open_char = '(';
+
+      close_char =  ')';
+
+      separator_char = ',';
+
+      scale_char = ',';
+
+    }
+
+
+
+  /* The output looks better if we put 7 bytes on a line, since that
+
+     puts most long word instructions on a single line.  */
+
+  info->bytes_per_line = 7;
+
+
+
+  info->private_data = &priv;
+
+  priv.max_fetched = priv.the_buffer;
+
+  priv.insn_start = pc;
+
+
+
+  obuf[0] = 0;
+
+  for (i = 0; i < MAX_OPERANDS; ++i)
+
+    {
+
+      op_out[i][0] = 0;
+
+      op_index[i] = -1;
+
+    }
+
+
+
+  the_info = info;
+
+  start_pc = pc;
+
+  start_codep = priv.the_buffer;
+
+  codep = priv.the_buffer;
+
+
+
+  if (sigsetjmp(priv.bailout, 0) != 0)
+
+    {
+
+      const char *name;
+
+
+
+      /* Getting here means we tried for data but didn't get it.  That
+
+	 means we have an incomplete instruction of some sort.  Just
+
+	 print the first byte as a prefix or a .byte pseudo-op.  */
+
+      if (codep > priv.the_buffer)
+
+	{
+
+	  name = prefix_name (priv.the_buffer[0], priv.orig_sizeflag);
+
+	  if (name != NULL)
+
+	    (*info->fprintf_func) (info->stream, ""%s"", name);
+
+	  else
+
+	    {
+
+	      /* Just print the first byte as a .byte instruction.  */
+
+	      (*info->fprintf_func) (info->stream, "".byte 0x%x"",
+
+				     (unsigned int) priv.the_buffer[0]);
+
+	    }
+
+
+
+	  return 1;
+
+	}
+
+
+
+      return -1;
+
+    }
+
+
+
+  obufp = obuf;
+
+  ckprefix ();
+
+  ckvexprefix ();
+
+
+
+  insn_codep = codep;
+
+  sizeflag = priv.orig_sizeflag;
+
+
+
+  fetch_data(info, codep + 1);
+
+  two_source_ops = (*codep == 0x62) || (*codep == 0xc8);
+
+
+
+  if (((prefixes & PREFIX_FWAIT)
+
+       && ((*codep < 0xd8) || (*codep > 0xdf)))
+
+      || (rex && rex_used))
+
+    {
+
+      const char *name;
+
+
+
+      /* fwait not followed by floating point instruction, or rex followed
+
+	 by other prefixes.  Print the first prefix.  */
+
+      name = prefix_name (priv.the_buffer[0], priv.orig_sizeflag);
+
+      if (name == NULL)
+
+	name = INTERNAL_DISASSEMBLER_ERROR;
+
+      (*info->fprintf_func) (info->stream, ""%s"", name);
+
+      return 1;
+
+    }
+
+
+
+  op = 0;
+
+  if (prefixes & PREFIX_VEX_0F)
+
+    {
+
+      used_prefixes |= PREFIX_VEX_0F | PREFIX_VEX_0F38 | PREFIX_VEX_0F3A;
+
+      if (prefixes & PREFIX_VEX_0F38)
+
+        threebyte = 0x38;
+
+      else if (prefixes & PREFIX_VEX_0F3A)
+
+        threebyte = 0x3a;
+
+      else
+
+        threebyte = *codep++;
+
+      goto vex_opcode;
+
+    }
+
+  if (*codep == 0x0f)
+
+    {
+
+      fetch_data(info, codep + 2);
+
+      threebyte = codep[1];
+
+      codep += 2;
+
+    vex_opcode:
+
+      dp = &dis386_twobyte[threebyte];
+
+      need_modrm = twobyte_has_modrm[threebyte];
+
+      uses_DATA_prefix = twobyte_uses_DATA_prefix[threebyte];
+
+      uses_REPNZ_prefix = twobyte_uses_REPNZ_prefix[threebyte];
+
+      uses_REPZ_prefix = twobyte_uses_REPZ_prefix[threebyte];
+
+      uses_LOCK_prefix = (threebyte & ~0x02) == 0x20;
+
+      if (dp->name == NULL && dp->op[0].bytemode == IS_3BYTE_OPCODE)
+
+	{
+
+          fetch_data(info, codep + 2);
+
+	  op = *codep++;
+
+	  switch (threebyte)
+
+	    {
+
+	    case 0x38:
+
+	      uses_DATA_prefix = threebyte_0x38_uses_DATA_prefix[op];
+
+	      uses_REPNZ_prefix = threebyte_0x38_uses_REPNZ_prefix[op];
+
+	      uses_REPZ_prefix = threebyte_0x38_uses_REPZ_prefix[op];
+
+	      break;
+
+	    case 0x3a:
+
+	      uses_DATA_prefix = threebyte_0x3a_uses_DATA_prefix[op];
+
+	      uses_REPNZ_prefix = threebyte_0x3a_uses_REPNZ_prefix[op];
+
+	      uses_REPZ_prefix = threebyte_0x3a_uses_REPZ_prefix[op];
+
+	      break;
+
+	    default:
+
+	      break;
+
+	    }
+
+	}
+
+    }
+
+  else
+
+    {
+
+      dp = &dis386[*codep];
+
+      need_modrm = onebyte_has_modrm[*codep];
+
+      uses_DATA_prefix = 0;
+
+      uses_REPNZ_prefix = 0;
+
+      /* pause is 0xf3 0x90.  */
+
+      uses_REPZ_prefix = *codep == 0x90;
+
+      uses_LOCK_prefix = 0;
+
+      codep++;
+
+    }
+
+
+
+  if (!uses_REPZ_prefix && (prefixes & PREFIX_REPZ))
+
+    {
+
+      oappend (""repz "");
+
+      used_prefixes |= PREFIX_REPZ;
+
+    }
+
+  if (!uses_REPNZ_prefix && (prefixes & PREFIX_REPNZ))
+
+    {
+
+      oappend (""repnz "");
+
+      used_prefixes |= PREFIX_REPNZ;
+
+    }
+
+
+
+  if (!uses_LOCK_prefix && (prefixes & PREFIX_LOCK))
+
+    {
+
+      oappend (""lock "");
+
+      used_prefixes |= PREFIX_LOCK;
+
+    }
+
+
+
+  if (prefixes & PREFIX_ADDR)
+
+    {
+
+      sizeflag ^= AFLAG;
+
+      if (dp->op[2].bytemode != loop_jcxz_mode || intel_syntax)
+
+	{
+
+	  if ((sizeflag & AFLAG) || address_mode == mode_64bit)
+
+	    oappend (""addr32 "");
+
+	  else
+
+	    oappend (""addr16 "");
+
+	  used_prefixes |= PREFIX_ADDR;
+
+	}
+
+    }
+
+
+
+  if (!uses_DATA_prefix && (prefixes & PREFIX_DATA))
+
+    {
+
+      sizeflag ^= DFLAG;
+
+      if (dp->op[2].bytemode == cond_jump_mode
+
+	  && dp->op[0].bytemode == v_mode
+
+	  && !intel_syntax)
+
+	{
+
+	  if (sizeflag & DFLAG)
+
+	    oappend (""data32 "");
+
+	  else
+
+	    oappend (""data16 "");
+
+	  used_prefixes |= PREFIX_DATA;
+
+	}
+
+    }
+
+
+
+  if (dp->name == NULL && dp->op[0].bytemode == IS_3BYTE_OPCODE)
+
+    {
+
+      dp = &three_byte_table[dp->op[1].bytemode][op];
+
+      modrm.mod = (*codep >> 6) & 3;
+
+      modrm.reg = (*codep >> 3) & 7;
+
+      modrm.rm = *codep & 7;
+
+    }
+
+  else if (need_modrm)
+
+    {
+
+      fetch_data(info, codep + 1);
+
+      modrm.mod = (*codep >> 6) & 3;
+
+      modrm.reg = (*codep >> 3) & 7;
+
+      modrm.rm = *codep & 7;
+
+    }
+
+
+
+  if (dp->name == NULL && dp->op[0].bytemode == FLOATCODE)
+
+    {
+
+      dofloat (sizeflag);
+
+    }
+
+  else
+
+    {
+
+      int index;
+
+      if (dp->name == NULL)
+
+	{
+
+	  switch (dp->op[0].bytemode)
+
+	    {
+
+	    case USE_GROUPS:
+
+	      dp = &grps[dp->op[1].bytemode][modrm.reg];
+
+	      break;
+
+
+
+	    case USE_PREFIX_USER_TABLE:
+
+	      index = 0;
+
+	      used_prefixes |= (prefixes & PREFIX_REPZ);
+
+	      if (prefixes & PREFIX_REPZ)
+
+		index = 1;
+
+	      else
+
+		{
+
+		  /* We should check PREFIX_REPNZ and PREFIX_REPZ
+
+		     before PREFIX_DATA.  */
+
+		  used_prefixes |= (prefixes & PREFIX_REPNZ);
+
+		  if (prefixes & PREFIX_REPNZ)
+
+		    index = 3;
+
+		  else
+
+		    {
+
+		      used_prefixes |= (prefixes & PREFIX_DATA);
+
+		      if (prefixes & PREFIX_DATA)
+
+			index = 2;
+
+		    }
+
+		}
+
+	      dp = &prefix_user_table[dp->op[1].bytemode][index];
+
+	      break;
+
+
+
+	    case X86_64_SPECIAL:
+
+	      index = address_mode == mode_64bit ? 1 : 0;
+
+	      dp = &x86_64_table[dp->op[1].bytemode][index];
+
+	      break;
+
+
+
+	    default:
+
+	      oappend (INTERNAL_DISASSEMBLER_ERROR);
+
+	      break;
+
+	    }
+
+	}
+
+
+
+      if (putop (dp->name, sizeflag) == 0)
+
+        {
+
+	  for (i = 0; i < MAX_OPERANDS; ++i)
+
+	    {
+
+	      obufp = op_out[i];
+
+	      op_ad = MAX_OPERANDS - 1 - i;
+
+	      if (dp->op[i].rtn)
+
+		(*dp->op[i].rtn) (dp->op[i].bytemode, sizeflag);
+
+	    }
+
+	}
+
+    }
+
+
+
+  /* See if any prefixes were not used.  If so, print the first one
+
+     separately.  If we don't do this, we'll wind up printing an
+
+     instruction stream which does not precisely correspond to the
+
+     bytes we are disassembling.  */
+
+  if ((prefixes & ~used_prefixes) != 0)
+
+    {
+
+      const char *name;
+
+
+
+      name = prefix_name (priv.the_buffer[0], priv.orig_sizeflag);
+
+      if (name == NULL)
+
+	name = INTERNAL_DISASSEMBLER_ERROR;
+
+      (*info->fprintf_func) (info->stream, ""%s"", name);
+
+      return 1;
+
+    }
+
+  if (rex & ~rex_used)
+
+    {
+
+      const char *name;
+
+      name = prefix_name (rex | 0x40, priv.orig_sizeflag);
+
+      if (name == NULL)
+
+	name = INTERNAL_DISASSEMBLER_ERROR;
+
+      (*info->fprintf_func) (info->stream, ""%s "", name);
+
+    }
+
+
+
+  obufp = obuf + strlen (obuf);
+
+  for (i = strlen (obuf); i < 6; i++)
+
+    oappend ("" "");
+
+  oappend ("" "");
+
+  (*info->fprintf_func) (info->stream, ""%s"", obuf);
+
+
+
+  /* The enter and bound instructions are printed with operands in the same
+
+     order as the intel book; everything else is printed in reverse order.  */
+
+  if (intel_syntax || two_source_ops)
+
+    {
+
+      bfd_vma riprel;
+
+
+
+      for (i = 0; i < MAX_OPERANDS; ++i)
+
+        op_txt[i] = op_out[i];
+
+
+
+      for (i = 0; i < (MAX_OPERANDS >> 1); ++i)
+
+	{
+
+          op_ad = op_index[i];
+
+          op_index[i] = op_index[MAX_OPERANDS - 1 - i];
+
+          op_index[MAX_OPERANDS - 1 - i] = op_ad;
+
+	  riprel = op_riprel[i];
+
+	  op_riprel[i] = op_riprel [MAX_OPERANDS - 1 - i];
+
+	  op_riprel[MAX_OPERANDS - 1 - i] = riprel;
+
+	}
+
+    }
+
+  else
+
+    {
+
+      for (i = 0; i < MAX_OPERANDS; ++i)
+
+        op_txt[MAX_OPERANDS - 1 - i] = op_out[i];
+
+    }
+
+
+
+  needcomma = 0;
+
+  for (i = 0; i < MAX_OPERANDS; ++i)
+
+    if (*op_txt[i])
+
+      {
+
+	if (needcomma)
+
+	  (*info->fprintf_func) (info->stream, "","");
+
+	if (op_index[i] != -1 && !op_riprel[i])
+
+	  (*info->print_address_func) ((bfd_vma) op_address[op_index[i]], info);
+
+	else
+
+	  (*info->fprintf_func) (info->stream, ""%s"", op_txt[i]);
+
+	needcomma = 1;
+
+      }
+
+
+
+  for (i = 0; i < MAX_OPERANDS; i++)
+
+    if (op_index[i] != -1 && op_riprel[i])
+
+      {
+
+	(*info->fprintf_func) (info->stream, ""        # "");
+
+	(*info->print_address_func) ((bfd_vma) (start_pc + codep - start_codep
+
+						+ op_address[op_index[i]]), info);
+
+	break;
+
+      }
+
+  return codep - priv.the_buffer;
+
+}"
+"static void vp6_parse_coeff_huffman(VP56Context *s)
+
+{
+
+    VP56Model *model = s->modelp;
+
+    uint8_t *permute = s->scantable.permutated;
+
+    VLC *vlc_coeff;
+
+    int coeff, sign, coeff_idx;
+
+    int b, cg, idx;
+
+    int pt = 0;    /* plane type (0 for Y, 1 for U or V) */
+
+
+
+    for (b=0; b<6; b++) {
+
+        int ct = 0;    /* code type */
+
+        if (b > 3) pt = 1;
+
+        vlc_coeff = &s->dccv_vlc[pt];
+
+
+
+        for (coeff_idx=0; coeff_idx<64; ) {
+
+            int run = 1;
+
+            if (coeff_idx<2 && s->nb_null[coeff_idx][pt]) {
+
+                s->nb_null[coeff_idx][pt]--;
+
+                if (coeff_idx)
+
+                    break;
+
+            } else {
+
+                if (get_bits_count(&s->gb) >= s->gb.size_in_bits)
+
+                    return;
+
+                coeff = get_vlc2(&s->gb, vlc_coeff->table, 9, 3);
+
+                if (coeff == 0) {
+
+                    if (coeff_idx) {
+
+                        int pt = (coeff_idx >= 6);
+
+                        run += get_vlc2(&s->gb, s->runv_vlc[pt].table, 9, 3);
+
+                        if (run >= 9)
+
+                            run += get_bits(&s->gb, 6);
+
+                    } else
+
+                        s->nb_null[0][pt] = vp6_get_nb_null(s);
+
+                    ct = 0;
+
+                } else if (coeff == 11) {  /* end of block */
+
+                    if (coeff_idx == 1)    /* first AC coeff ? */
+
+                        s->nb_null[1][pt] = vp6_get_nb_null(s);
+
+                    break;
+
+                } else {
+
+                    int coeff2 = vp56_coeff_bias[coeff];
+
+                    if (coeff > 4)
+
+                        coeff2 += get_bits(&s->gb, coeff <= 9 ? coeff - 4 : 11);
+
+                    ct = 1 + (coeff2 > 1);
+
+                    sign = get_bits1(&s->gb);
+
+                    coeff2 = (coeff2 ^ -sign) + sign;
+
+                    if (coeff_idx)
+
+                        coeff2 *= s->dequant_ac;
+
+                    idx = model->coeff_index_to_pos[coeff_idx];
+
+                    s->block_coeff[b][permute[idx]] = coeff2;
+
+                }
+
+            }
+
+            coeff_idx+=run;
+
+            cg = FFMIN(vp6_coeff_groups[coeff_idx], 3);
+
+            vlc_coeff = &s->ract_vlc[pt][ct][cg];
+
+        }
+
+    }
+
+}"
+"static int vncws_start_tls_handshake(VncState *vs)
+
+{
+
+    int ret = gnutls_handshake(vs->tls.session);
+
+
+
+    if (ret < 0) {
+
+        if (!gnutls_error_is_fatal(ret)) {
+
+            VNC_DEBUG(""Handshake interrupted (blocking)\n"");
+
+            if (!gnutls_record_get_direction(vs->tls.session)) {
+
+                qemu_set_fd_handler(vs->csock, vncws_tls_handshake_io,
+
+                                    NULL, vs);
+
+            } else {
+
+                qemu_set_fd_handler(vs->csock, NULL, vncws_tls_handshake_io,
+
+                                    vs);
+
+            }
+
+            return 0;
+
+        }
+
+        VNC_DEBUG(""Handshake failed %s\n"", gnutls_strerror(ret));
+
+        vnc_client_error(vs);
+
+        return -1;
+
+    }
+
+
+
+    if (vs->vd->tls.x509verify) {
+
+        if (vnc_tls_validate_certificate(vs) < 0) {
+
+            VNC_DEBUG(""Client verification failed\n"");
+
+            vnc_client_error(vs);
+
+            return -1;
+
+        } else {
+
+            VNC_DEBUG(""Client verification passed\n"");
+
+        }
+
+    }
+
+
+
+    VNC_DEBUG(""Handshake done, switching to TLS data mode\n"");
+
+    qemu_set_fd_handler(vs->csock, vncws_handshake_read, NULL, vs);
+
+
+
+    return 0;
+
+}"
+"av_cold void ff_af_queue_init(AVCodecContext *avctx, AudioFrameQueue *afq)
+
+{
+
+    afq->avctx             = avctx;
+
+    afq->next_pts          = AV_NOPTS_VALUE;
+
+    afq->remaining_delay   = avctx->delay;
+
+    afq->remaining_samples = avctx->delay;
+
+    afq->frame_queue       = NULL;
+
+}"
+"static int qcow2_create(const char *filename, QemuOpts *opts, Error **errp)
+
+{
+
+    char *backing_file = NULL;
+
+    char *backing_fmt = NULL;
+
+    char *buf = NULL;
+
+    uint64_t size = 0;
+
+    int flags = 0;
+
+    size_t cluster_size = DEFAULT_CLUSTER_SIZE;
+
+    PreallocMode prealloc;
+
+    int version;
+
+    uint64_t refcount_bits;
+
+    int refcount_order;
+
+    const char *encryptfmt = NULL;
+
+    Error *local_err = NULL;
+
+    int ret;
+
+
+
+    /* Read out options */
+
+    size = ROUND_UP(qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0),
+
+                    BDRV_SECTOR_SIZE);
+
+    backing_file = qemu_opt_get_del(opts, BLOCK_OPT_BACKING_FILE);
+
+    backing_fmt = qemu_opt_get_del(opts, BLOCK_OPT_BACKING_FMT);
+
+    encryptfmt = qemu_opt_get_del(opts, BLOCK_OPT_ENCRYPT_FORMAT);
+
+    if (encryptfmt) {
+
+        if (qemu_opt_get_del(opts, BLOCK_OPT_ENCRYPT)) {
+
+            error_setg(errp, ""Options "" BLOCK_OPT_ENCRYPT "" and ""
+
+                       BLOCK_OPT_ENCRYPT_FORMAT "" are mutually exclusive"");
+
+            ret = -EINVAL;
+
+            goto finish;
+
+        }
+
+    } else if (qemu_opt_get_bool_del(opts, BLOCK_OPT_ENCRYPT, false)) {
+
+        encryptfmt = ""aes"";
+
+    }
+
+    cluster_size = qcow2_opt_get_cluster_size_del(opts, &local_err);
+
+    if (local_err) {
+
+        error_propagate(errp, local_err);
+
+        ret = -EINVAL;
+
+        goto finish;
+
+    }
+
+    buf = qemu_opt_get_del(opts, BLOCK_OPT_PREALLOC);
+
+    prealloc = qapi_enum_parse(PreallocMode_lookup, buf,
+
+                               PREALLOC_MODE__MAX, PREALLOC_MODE_OFF,
+
+                               &local_err);
+
+    if (local_err) {
+
+        error_propagate(errp, local_err);
+
+        ret = -EINVAL;
+
+        goto finish;
+
+    }
+
+
+
+    version = qcow2_opt_get_version_del(opts, &local_err);
+
+    if (local_err) {
+
+        error_propagate(errp, local_err);
+
+        ret = -EINVAL;
+
+        goto finish;
+
+    }
+
+
+
+    if (qemu_opt_get_bool_del(opts, BLOCK_OPT_LAZY_REFCOUNTS, false)) {
+
+        flags |= BLOCK_FLAG_LAZY_REFCOUNTS;
+
+    }
+
+
+
+    if (backing_file && prealloc != PREALLOC_MODE_OFF) {
+
+        error_setg(errp, ""Backing file and preallocation cannot be used at ""
+
+                   ""the same time"");
+
+        ret = -EINVAL;
+
+        goto finish;
+
+    }
+
+
+
+    if (version < 3 && (flags & BLOCK_FLAG_LAZY_REFCOUNTS)) {
+
+        error_setg(errp, ""Lazy refcounts only supported with compatibility ""
+
+                   ""level 1.1 and above (use compat=1.1 or greater)"");
+
+        ret = -EINVAL;
+
+        goto finish;
+
+    }
+
+
+
+    refcount_bits = qcow2_opt_get_refcount_bits_del(opts, version, &local_err);
+
+    if (local_err) {
+
+        error_propagate(errp, local_err);
+
+        ret = -EINVAL;
+
+        goto finish;
+
+    }
+
+
+
+    refcount_order = ctz32(refcount_bits);
+
+
+
+    ret = qcow2_create2(filename, size, backing_file, backing_fmt, flags,
+
+                        cluster_size, prealloc, opts, version, refcount_order,
+
+                        encryptfmt, &local_err);
+
+    error_propagate(errp, local_err);
+
+
+
+finish:
+
+    g_free(backing_file);
+
+    g_free(backing_fmt);
+
+    g_free(buf);
+
+    return ret;
+
+}"
+"static void quantize_mantissas(AC3EncodeContext *s)
+
+{
+
+    int blk, ch;
+
+
+
+
+
+    for (blk = 0; blk < AC3_MAX_BLOCKS; blk++) {
+
+        AC3Block *block = &s->blocks[blk];
+
+        s->mant1_cnt  = s->mant2_cnt  = s->mant4_cnt  = 0;
+
+        s->qmant1_ptr = s->qmant2_ptr = s->qmant4_ptr = NULL;
+
+
+
+        for (ch = 0; ch < s->channels; ch++) {
+
+            quantize_mantissas_blk_ch(s, block->fixed_coef[ch], block->exp_shift[ch],
+
+                                      block->exp[ch], block->bap[ch],
+
+                                      block->qmant[ch], s->nb_coefs[ch]);
+
+        }
+
+    }
+
+}"
+"static void emulated_push_error(EmulatedState *card, uint64_t code)
+
+{
+
+    EmulEvent *event = (EmulEvent *)g_malloc(sizeof(EmulEvent));
+
+
+
+    assert(event);
+
+    event->p.error.type = EMUL_ERROR;
+
+    event->p.error.code = code;
+
+    emulated_push_event(card, event);
+
+}"
+"static void dma_blk_cb(void *opaque, int ret)
+
+{
+
+    DMAAIOCB *dbs = (DMAAIOCB *)opaque;
+
+    dma_addr_t cur_addr, cur_len;
+
+    void *mem;
+
+
+
+    trace_dma_blk_cb(dbs, ret);
+
+
+
+    dbs->acb = NULL;
+
+    dbs->sector_num += dbs->iov.size / 512;
+
+
+
+    if (dbs->sg_cur_index == dbs->sg->nsg || ret < 0) {
+
+        dma_complete(dbs, ret);
+
+        return;
+
+    }
+
+    dma_blk_unmap(dbs);
+
+
+
+    while (dbs->sg_cur_index < dbs->sg->nsg) {
+
+        cur_addr = dbs->sg->sg[dbs->sg_cur_index].base + dbs->sg_cur_byte;
+
+        cur_len = dbs->sg->sg[dbs->sg_cur_index].len - dbs->sg_cur_byte;
+
+        mem = dma_memory_map(dbs->sg->as, cur_addr, &cur_len, dbs->dir);
+
+        if (!mem)
+
+            break;
+
+        qemu_iovec_add(&dbs->iov, mem, cur_len);
+
+        dbs->sg_cur_byte += cur_len;
+
+        if (dbs->sg_cur_byte == dbs->sg->sg[dbs->sg_cur_index].len) {
+
+            dbs->sg_cur_byte = 0;
+
+            ++dbs->sg_cur_index;
+
+        }
+
+    }
+
+
+
+    if (dbs->iov.size == 0) {
+
+        trace_dma_map_wait(dbs);
+
+        cpu_register_map_client(dbs, continue_after_map_failure);
+
+        return;
+
+    }
+
+
+
+    if (dbs->iov.size & ~BDRV_SECTOR_MASK) {
+
+        qemu_iovec_discard_back(&dbs->iov, dbs->iov.size & ~BDRV_SECTOR_MASK);
+
+    }
+
+
+
+    dbs->acb = dbs->io_func(dbs->blk, dbs->sector_num, &dbs->iov,
+
+                            dbs->iov.size / 512, dma_blk_cb, dbs);
+
+    assert(dbs->acb);
+
+}"
+"long do_sigreturn(CPUPPCState *env)
+
+{
+
+    struct target_sigcontext *sc = NULL;
+
+    struct target_mcontext *sr = NULL;
+
+    target_ulong sr_addr = 0, sc_addr;
+
+    sigset_t blocked;
+
+    target_sigset_t set;
+
+
+
+    sc_addr = env->gpr[1] + SIGNAL_FRAMESIZE;
+
+    if (!lock_user_struct(VERIFY_READ, sc, sc_addr, 1))
+
+        goto sigsegv;
+
+
+
+#if defined(TARGET_PPC64)
+
+    set.sig[0] = sc->oldmask + ((uint64_t)(sc->_unused[3]) << 32);
+
+#else
+
+    __get_user(set.sig[0], &sc->oldmask);
+
+    __get_user(set.sig[1], &sc->_unused[3]);
+
+#endif
+
+    target_to_host_sigset_internal(&blocked, &set);
+
+    set_sigmask(&blocked);
+
+
+
+    __get_user(sr_addr, &sc->regs);
+
+    if (!lock_user_struct(VERIFY_READ, sr, sr_addr, 1))
+
+        goto sigsegv;
+
+    restore_user_regs(env, sr, 1);
+
+
+
+    unlock_user_struct(sr, sr_addr, 1);
+
+    unlock_user_struct(sc, sc_addr, 1);
+
+    return -TARGET_QEMU_ESIGRETURN;
+
+
+
+sigsegv:
+
+    unlock_user_struct(sr, sr_addr, 1);
+
+    unlock_user_struct(sc, sc_addr, 1);
+
+    force_sig(TARGET_SIGSEGV);
+
+    return 0;
+
+}"
+"static int virtio_gpu_load(QEMUFile *f, void *opaque, size_t size)
+
+{
+
+    VirtIOGPU *g = opaque;
+
+    struct virtio_gpu_simple_resource *res;
+
+    struct virtio_gpu_scanout *scanout;
+
+    uint32_t resource_id, pformat;
+
+    int i;
+
+
+
+    g->hostmem = 0;
+
+
+
+    resource_id = qemu_get_be32(f);
+
+    while (resource_id != 0) {
+
+        res = g_new0(struct virtio_gpu_simple_resource, 1);
+
+        res->resource_id = resource_id;
+
+        res->width = qemu_get_be32(f);
+
+        res->height = qemu_get_be32(f);
+
+        res->format = qemu_get_be32(f);
+
+        res->iov_cnt = qemu_get_be32(f);
+
+
+
+        /* allocate */
+
+        pformat = get_pixman_format(res->format);
+
+        if (!pformat) {
+
+
+            return -EINVAL;
+
+
+        res->image = pixman_image_create_bits(pformat,
+
+                                              res->width, res->height,
+
+                                              NULL, 0);
+
+        if (!res->image) {
+
+
+            return -EINVAL;
+
+
+
+
+        res->hostmem = PIXMAN_FORMAT_BPP(pformat) * res->width * res->height;
+
+
+
+        res->addrs = g_new(uint64_t, res->iov_cnt);
+
+        res->iov = g_new(struct iovec, res->iov_cnt);
+
+
+
+        /* read data */
+
+        for (i = 0; i < res->iov_cnt; i++) {
+
+            res->addrs[i] = qemu_get_be64(f);
+
+            res->iov[i].iov_len = qemu_get_be32(f);
+
+
+        qemu_get_buffer(f, (void *)pixman_image_get_data(res->image),
+
+                        pixman_image_get_stride(res->image) * res->height);
+
+
+
+        /* restore mapping */
+
+        for (i = 0; i < res->iov_cnt; i++) {
+
+            hwaddr len = res->iov[i].iov_len;
+
+            res->iov[i].iov_base =
+
+                cpu_physical_memory_map(res->addrs[i], &len, 1);
+
+            if (!res->iov[i].iov_base || len != res->iov[i].iov_len) {
+
+
+
+
+
+
+
+
+
+
+
+                return -EINVAL;
+
+
+
+
+
+        QTAILQ_INSERT_HEAD(&g->reslist, res, next);
+
+        g->hostmem += res->hostmem;
+
+
+
+        resource_id = qemu_get_be32(f);
+
+
+
+
+    /* load & apply scanout state */
+
+    vmstate_load_state(f, &vmstate_virtio_gpu_scanouts, g, 1);
+
+    for (i = 0; i < g->conf.max_outputs; i++) {
+
+        scanout = &g->scanout[i];
+
+        if (!scanout->resource_id) {
+
+            continue;
+
+
+        res = virtio_gpu_find_resource(g, scanout->resource_id);
+
+        if (!res) {
+
+            return -EINVAL;
+
+
+        scanout->ds = qemu_create_displaysurface_pixman(res->image);
+
+        if (!scanout->ds) {
+
+            return -EINVAL;
+
+
+
+
+        dpy_gfx_replace_surface(scanout->con, scanout->ds);
+
+        dpy_gfx_update(scanout->con, 0, 0, scanout->width, scanout->height);
+
+        update_cursor(g, &scanout->cursor);
+
+        res->scanout_bitmask |= (1 << i);
+
+
+
+
+    return 0;"
+"static av_cold int iv_alloc_frames(Indeo3DecodeContext *s)
+
+{
+
+    int luma_width    = (s->width           + 3) & ~3,
+
+        luma_height   = (s->height          + 3) & ~3,
+
+        chroma_width  = ((luma_width  >> 2) + 3) & ~3,
+
+        chroma_height = ((luma_height >> 2) + 3) & ~3,
+
+        luma_pixels   = luma_width   * luma_height,
+
+        chroma_pixels = chroma_width * chroma_height,
+
+        i;
+
+    unsigned int bufsize = luma_pixels * 2 + luma_width * 3 +
+
+                          (chroma_pixels   + chroma_width) * 4;
+
+
+
+
+    if(!(s->buf = av_malloc(bufsize)))
+
+        return AVERROR(ENOMEM);
+
+    s->iv_frame[0].y_w = s->iv_frame[1].y_w = luma_width;
+
+    s->iv_frame[0].y_h = s->iv_frame[1].y_h = luma_height;
+
+    s->iv_frame[0].uv_w = s->iv_frame[1].uv_w = chroma_width;
+
+    s->iv_frame[0].uv_h = s->iv_frame[1].uv_h = chroma_height;
+
+
+
+    s->iv_frame[0].Ybuf = s->buf + luma_width;
+
+    i = luma_pixels + luma_width * 2;
+
+    s->iv_frame[1].Ybuf = s->buf + i;
+
+    i += (luma_pixels + luma_width);
+
+    s->iv_frame[0].Ubuf = s->buf + i;
+
+    i += (chroma_pixels + chroma_width);
+
+    s->iv_frame[1].Ubuf = s->buf + i;
+
+    i += (chroma_pixels + chroma_width);
+
+    s->iv_frame[0].Vbuf = s->buf + i;
+
+    i += (chroma_pixels + chroma_width);
+
+    s->iv_frame[1].Vbuf = s->buf + i;
+
+
+
+    for(i = 1; i <= luma_width; i++)
+
+        s->iv_frame[0].Ybuf[-i] = s->iv_frame[1].Ybuf[-i] =
+
+            s->iv_frame[0].Ubuf[-i] = 0x80;
+
+
+
+    for(i = 1; i <= chroma_width; i++) {
+
+        s->iv_frame[1].Ubuf[-i] = 0x80;
+
+        s->iv_frame[0].Vbuf[-i] = 0x80;
+
+        s->iv_frame[1].Vbuf[-i] = 0x80;
+
+        s->iv_frame[1].Vbuf[chroma_pixels+i-1] = 0x80;
+
+    }
+
+
+
+    return 0;
+
+}"
+"static int mov_write_minf_tag(AVIOContext *pb, MOVMuxContext *mov, MOVTrack *track)
+
+{
+
+    int64_t pos = avio_tell(pb);
+
+    int ret;
+
+
+
+    avio_wb32(pb, 0); /* size */
+
+    ffio_wfourcc(pb, ""minf"");
+
+    if (track->enc->codec_type == AVMEDIA_TYPE_VIDEO)
+
+        mov_write_vmhd_tag(pb);
+
+    else if (track->enc->codec_type == AVMEDIA_TYPE_AUDIO)
+
+        mov_write_smhd_tag(pb);
+
+    else if (track->enc->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+
+        if (track->tag == MKTAG('t','e','x','t') || is_clcp_track(track)) {
+
+            mov_write_gmhd_tag(pb, track);
+
+        } else {
+
+            mov_write_nmhd_tag(pb);
+
+        }
+
+    } else if (track->tag == MKTAG('r','t','p',' ')) {
+
+        mov_write_hmhd_tag(pb);
+
+    } else if (track->tag == MKTAG('t','m','c','d')) {
+
+        mov_write_gmhd_tag(pb, track);
+
+    }
+
+    if (track->mode == MODE_MOV) /* FIXME: Why do it for MODE_MOV only ? */
+
+        mov_write_hdlr_tag(pb, NULL);
+
+    mov_write_dinf_tag(pb);
+
+    if ((ret = mov_write_stbl_tag(pb, mov, track)) < 0)
+
+        return ret;
+
+    return update_size(pb, pos);
+
+}"
+"int av_packet_ref(AVPacket *dst, AVPacket *src)
+
+{
+
+    int ret;
+
+
+
+    ret = av_packet_copy_props(dst, src);
+
+    if (ret < 0)
+
+        return ret;
+
+
+
+    if (!src->buf) {
+
+        ret = packet_alloc(&dst->buf, src->size);
+
+        if (ret < 0)
+
+            goto fail;
+
+        memcpy(dst->buf->data, src->data, src->size);
+
+    } else
+
+        dst->buf = av_buffer_ref(src->buf);
+
+
+
+    dst->size = src->size;
+
+    dst->data = dst->buf->data;
+
+    return 0;
+
+fail:
+
+    av_packet_free_side_data(dst);
+
+    return ret;
+
+}"
+"av_cold void ff_float_dsp_init_ppc(AVFloatDSPContext *fdsp, int bit_exact)
+
+{
+
+#if HAVE_ALTIVEC
+
+    if (!(av_get_cpu_flags() & AV_CPU_FLAG_ALTIVEC))
+
+        return;
+
+
+
+    fdsp->vector_fmul = ff_vector_fmul_altivec;
+
+    fdsp->vector_fmul_add = ff_vector_fmul_add_altivec;
+
+    fdsp->vector_fmul_reverse = ff_vector_fmul_reverse_altivec;
+
+
+
+    if (!bit_exact) {
+
+        fdsp->vector_fmul_window = ff_vector_fmul_window_altivec;
+
+    }
+
+#endif
+
+}"
+"static int config_props(AVFilterLink *inlink)
+
+{
+
+    AVFilterContext *ctx = inlink->dst;
+
+    LutContext *lut = ctx->priv;
+
+    const AVPixFmtDescriptor *desc = &av_pix_fmt_descriptors[inlink->format];
+
+    int min[4], max[4];
+
+    int val, comp, ret;
+
+
+
+    lut->hsub = desc->log2_chroma_w;
+
+    lut->vsub = desc->log2_chroma_h;
+
+
+
+    lut->var_values[VAR_W] = inlink->w;
+
+    lut->var_values[VAR_H] = inlink->h;
+
+
+
+    switch (inlink->format) {
+
+    case PIX_FMT_YUV410P:
+
+    case PIX_FMT_YUV411P:
+
+    case PIX_FMT_YUV420P:
+
+    case PIX_FMT_YUV422P:
+
+    case PIX_FMT_YUV440P:
+
+    case PIX_FMT_YUV444P:
+
+    case PIX_FMT_YUVA420P:
+
+        min[Y] = min[U] = min[V] = 16;
+
+        max[Y] = 235;
+
+        max[U] = max[V] = 240;
+
+        min[A] = 0; max[A] = 255;
+
+        break;
+
+    default:
+
+        min[0] = min[1] = min[2] = min[3] = 0;
+
+        max[0] = max[1] = max[2] = max[3] = 255;
+
+    }
+
+
+
+    lut->is_yuv = lut->is_rgb = 0;
+
+    if      (ff_fmt_is_in(inlink->format, yuv_pix_fmts)) lut->is_yuv = 1;
+
+    else if (ff_fmt_is_in(inlink->format, rgb_pix_fmts)) lut->is_rgb = 1;
+
+
+
+    if (lut->is_rgb) {
+
+        switch (inlink->format) {
+
+        case PIX_FMT_ARGB:  lut->rgba_map[A] = 0; lut->rgba_map[R] = 1; lut->rgba_map[G] = 2; lut->rgba_map[B] = 3; break;
+
+        case PIX_FMT_ABGR:  lut->rgba_map[A] = 0; lut->rgba_map[B] = 1; lut->rgba_map[G] = 2; lut->rgba_map[R] = 3; break;
+
+        case PIX_FMT_RGBA:
+
+        case PIX_FMT_RGB24: lut->rgba_map[R] = 0; lut->rgba_map[G] = 1; lut->rgba_map[B] = 2; lut->rgba_map[A] = 3; break;
+
+        case PIX_FMT_BGRA:
+
+        case PIX_FMT_BGR24: lut->rgba_map[B] = 0; lut->rgba_map[G] = 1; lut->rgba_map[R] = 2; lut->rgba_map[A] = 3; break;
+
+        }
+
+        lut->step = av_get_bits_per_pixel(desc) >> 3;
+
+    }
+
+
+
+    for (comp = 0; comp < desc->nb_components; comp++) {
+
+        double res;
+
+
+
+        /* create the parsed expression */
+
+        ret = av_expr_parse(&lut->comp_expr[comp], lut->comp_expr_str[comp],
+
+                            var_names, funcs1_names, funcs1, NULL, NULL, 0, ctx);
+
+        if (ret < 0) {
+
+            av_log(ctx, AV_LOG_ERROR,
+
+                   ""Error when parsing the expression '%s' for the component %d.\n"",
+
+                   lut->comp_expr_str[comp], comp);
+
+            return AVERROR(EINVAL);
+
+        }
+
+
+
+        /* compute the lut */
+
+        lut->var_values[VAR_MAXVAL] = max[comp];
+
+        lut->var_values[VAR_MINVAL] = min[comp];
+
+
+
+        for (val = 0; val < 256; val++) {
+
+            lut->var_values[VAR_VAL] = val;
+
+            lut->var_values[VAR_CLIPVAL] = av_clip(val, min[comp], max[comp]);
+
+            lut->var_values[VAR_NEGVAL] =
+
+                av_clip(min[comp] + max[comp] - lut->var_values[VAR_VAL],
+
+                        min[comp], max[comp]);
+
+
+
+            res = av_expr_eval(lut->comp_expr[comp], lut->var_values, lut);
+
+            if (isnan(res)) {
+
+                av_log(ctx, AV_LOG_ERROR,
+
+                       ""Error when evaluating the expression '%s' for the value %d for the component #%d.\n"",
+
+                       lut->comp_expr_str[comp], val, comp);
+
+                return AVERROR(EINVAL);
+
+            }
+
+            lut->lut[comp][val] = av_clip((int)res, min[comp], max[comp]);
+
+            av_log(ctx, AV_LOG_DEBUG, ""val[%d][%d] = %d\n"", comp, val, lut->lut[comp][val]);
+
+        }
+
+    }
+
+
+
+    return 0;
+
+}"
+"static av_cold int rpza_decode_init(AVCodecContext *avctx)
+
+{
+
+    RpzaContext *s = avctx->priv_data;
+
+
+
+    s->avctx = avctx;
+
+    avctx->pix_fmt = AV_PIX_FMT_RGB555;
+
+
+
+    s->frame.data[0] = NULL;
+
+
+
+    return 0;
+
+}"
+"static int huffman_decode(MPADecodeContext *s, GranuleDef *g,
+
+                          int16_t *exponents, int end_pos2)
+
+{
+
+    int s_index;
+
+    int i;
+
+    int last_pos, bits_left;
+
+    VLC *vlc;
+
+    int end_pos = FFMIN(end_pos2, s->gb.size_in_bits);
+
+
+
+    /* low frequencies (called big values) */
+
+    s_index = 0;
+
+    for (i = 0; i < 3; i++) {
+
+        int j, k, l, linbits;
+
+        j = g->region_size[i];
+
+        if (j == 0)
+
+            continue;
+
+        /* select vlc table */
+
+        k       = g->table_select[i];
+
+        l       = mpa_huff_data[k][0];
+
+        linbits = mpa_huff_data[k][1];
+
+        vlc     = &huff_vlc[l];
+
+
+
+        if (!l) {
+
+            memset(&g->sb_hybrid[s_index], 0, sizeof(*g->sb_hybrid) * 2 * j);
+
+            s_index += 2 * j;
+
+            continue;
+
+        }
+
+
+
+        /* read huffcode and compute each couple */
+
+        for (; j > 0; j--) {
+
+            int exponent, x, y;
+
+            int v;
+
+            int pos = get_bits_count(&s->gb);
+
+
+
+            if (pos >= end_pos){
+
+                switch_buffer(s, &pos, &end_pos, &end_pos2);
+
+                if (pos >= end_pos)
+
+                    break;
+
+            }
+
+            y = get_vlc2(&s->gb, vlc->table, 7, 3);
+
+
+
+            if (!y) {
+
+                g->sb_hybrid[s_index  ] =
+
+                g->sb_hybrid[s_index+1] = 0;
+
+                s_index += 2;
+
+                continue;
+
+            }
+
+
+
+            exponent= exponents[s_index];
+
+
+
+            ff_dlog(s->avctx, ""region=%d n=%d x=%d y=%d exp=%d\n"",
+
+                    i, g->region_size[i] - j, x, y, exponent);
+
+            if (y & 16) {
+
+                x = y >> 5;
+
+                y = y & 0x0f;
+
+                if (x < 15) {
+
+                    READ_FLIP_SIGN(g->sb_hybrid + s_index, RENAME(expval_table)[exponent] + x)
+
+                } else {
+
+                    x += get_bitsz(&s->gb, linbits);
+
+                    v  = l3_unscale(x, exponent);
+
+                    if (get_bits1(&s->gb))
+
+                        v = -v;
+
+                    g->sb_hybrid[s_index] = v;
+
+                }
+
+                if (y < 15) {
+
+                    READ_FLIP_SIGN(g->sb_hybrid + s_index + 1, RENAME(expval_table)[exponent] + y)
+
+                } else {
+
+                    y += get_bitsz(&s->gb, linbits);
+
+                    v  = l3_unscale(y, exponent);
+
+                    if (get_bits1(&s->gb))
+
+                        v = -v;
+
+                    g->sb_hybrid[s_index+1] = v;
+
+                }
+
+            } else {
+
+                x = y >> 5;
+
+                y = y & 0x0f;
+
+                x += y;
+
+                if (x < 15) {
+
+                    READ_FLIP_SIGN(g->sb_hybrid + s_index + !!y, RENAME(expval_table)[exponent] + x)
+
+                } else {
+
+                    x += get_bitsz(&s->gb, linbits);
+
+                    v  = l3_unscale(x, exponent);
+
+                    if (get_bits1(&s->gb))
+
+                        v = -v;
+
+                    g->sb_hybrid[s_index+!!y] = v;
+
+                }
+
+                g->sb_hybrid[s_index + !y] = 0;
+
+            }
+
+            s_index += 2;
+
+        }
+
+    }
+
+
+
+    /* high frequencies */
+
+    vlc = &huff_quad_vlc[g->count1table_select];
+
+    last_pos = 0;
+
+    while (s_index <= 572) {
+
+        int pos, code;
+
+        pos = get_bits_count(&s->gb);
+
+        if (pos >= end_pos) {
+
+            if (pos > end_pos2 && last_pos) {
+
+                /* some encoders generate an incorrect size for this
+
+                   part. We must go back into the data */
+
+                s_index -= 4;
+
+                skip_bits_long(&s->gb, last_pos - pos);
+
+                av_log(s->avctx, AV_LOG_INFO, ""overread, skip %d enddists: %d %d\n"", last_pos - pos, end_pos-pos, end_pos2-pos);
+
+                if(s->err_recognition & AV_EF_BITSTREAM)
+
+                    s_index=0;
+
+                break;
+
+            }
+
+            switch_buffer(s, &pos, &end_pos, &end_pos2);
+
+            if (pos >= end_pos)
+
+                break;
+
+        }
+
+        last_pos = pos;
+
+
+
+        code = get_vlc2(&s->gb, vlc->table, vlc->bits, 1);
+
+        ff_dlog(s->avctx, ""t=%d code=%d\n"", g->count1table_select, code);
+
+        g->sb_hybrid[s_index+0] =
+
+        g->sb_hybrid[s_index+1] =
+
+        g->sb_hybrid[s_index+2] =
+
+        g->sb_hybrid[s_index+3] = 0;
+
+        while (code) {
+
+            static const int idxtab[16] = { 3,3,2,2,1,1,1,1,0,0,0,0,0,0,0,0 };
+
+            int v;
+
+            int pos = s_index + idxtab[code];
+
+            code   ^= 8 >> idxtab[code];
+
+            READ_FLIP_SIGN(g->sb_hybrid + pos, RENAME(exp_table)+exponents[pos])
+
+        }
+
+        s_index += 4;
+
+    }
+
+    /* skip extension bits */
+
+    bits_left = end_pos2 - get_bits_count(&s->gb);
+
+    if (bits_left < 0 && (s->err_recognition & AV_EF_BUFFER)) {
+
+        av_log(s->avctx, AV_LOG_ERROR, ""bits_left=%d\n"", bits_left);
+
+        s_index=0;
+
+    } else if (bits_left > 0 && (s->err_recognition & AV_EF_BUFFER)) {
+
+        av_log(s->avctx, AV_LOG_ERROR, ""bits_left=%d\n"", bits_left);
+
+        s_index = 0;
+
+    }
+
+    memset(&g->sb_hybrid[s_index], 0, sizeof(*g->sb_hybrid) * (576 - s_index));
+
+    skip_bits_long(&s->gb, bits_left);
+
+
+
+    i = get_bits_count(&s->gb);
+
+    switch_buffer(s, &i, &end_pos, &end_pos2);
+
+
+
+    return 0;
+
+}"
+"void helper_slbie(CPUPPCState *env, target_ulong addr)
+
+{
+
+    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+
+    ppc_slb_t *slb;
+
+
+
+    slb = slb_lookup(cpu, addr);
+
+    if (!slb) {
+
+        return;
+
+    }
+
+
+
+    if (slb->esid & SLB_ESID_V) {
+
+        slb->esid &= ~SLB_ESID_V;
+
+
+
+        /* XXX: given the fact that segment size is 256 MB or 1TB,
+
+         *      and we still don't have a tlb_flush_mask(env, n, mask)
+
+         *      in QEMU, we just invalidate all TLBs
+
+         */
+
+        tlb_flush(CPU(cpu), 1);
+
+    }
+
+}"
+"static inline void do_rfi(CPUPPCState *env, target_ulong nip, target_ulong msr)
+
+{
+
+    CPUState *cs = CPU(ppc_env_get_cpu(env));
+
+
+
+    /* MSR:POW cannot be set by any form of rfi */
+
+    msr &= ~(1ULL << MSR_POW);
+
+
+
+#if defined(TARGET_PPC64)
+
+    /* Switching to 32-bit ? Crop the nip */
+
+    if (!msr_is_64bit(env, msr)) {
+
+        nip = (uint32_t)nip;
+
+    }
+
+#else
+
+    nip = (uint32_t)nip;
+
+#endif
+
+    /* XXX: beware: this is false if VLE is supported */
+
+    env->nip = nip & ~((target_ulong)0x00000003);
+
+    hreg_store_msr(env, msr, 1);
+
+#if defined(DEBUG_OP)
+
+    cpu_dump_rfi(env->nip, env->msr);
+
+#endif
+
+    /* No need to raise an exception here,
+
+     * as rfi is always the last insn of a TB
+
+     */
+
+    cs->interrupt_request |= CPU_INTERRUPT_EXITTB;
+
+
+
+    /* Context synchronizing: check if TCG TLB needs flush */
+
+    check_tlb_flush(env);
+
+}"
+"static int subframe_count_exact(FlacEncodeContext *s, FlacSubframe *sub,
+
+                                int pred_order)
+
+{
+
+    int p, porder, psize;
+
+    int i, part_end;
+
+    int count = 0;
+
+
+
+    /* subframe header */
+
+    count += 8;
+
+
+
+    /* subframe */
+
+    if (sub->type == FLAC_SUBFRAME_CONSTANT) {
+
+        count += sub->obits;
+
+    } else if (sub->type == FLAC_SUBFRAME_VERBATIM) {
+
+        count += s->frame.blocksize * sub->obits;
+
+    } else {
+
+        /* warm-up samples */
+
+        count += pred_order * sub->obits;
+
+
+
+        /* LPC coefficients */
+
+        if (sub->type == FLAC_SUBFRAME_LPC)
+
+            count += 4 + 5 + pred_order * s->options.lpc_coeff_precision;
+
+
+
+        /* rice-encoded block */
+
+        count += 2;
+
+
+
+        /* partition order */
+
+        porder = sub->rc.porder;
+
+        psize  = s->frame.blocksize >> porder;
+
+        count += 4;
+
+
+
+        /* residual */
+
+        i        = pred_order;
+
+        part_end = psize;
+
+        for (p = 0; p < 1 << porder; p++) {
+
+            int k = sub->rc.params[p];
+
+            count += 4;
+
+            count += rice_count_exact(&sub->residual[i], part_end - i, k);
+
+            i = part_end;
+
+            part_end = FFMIN(s->frame.blocksize, part_end + psize);
+
+        }
+
+    }
+
+
+
+    return count;
+
+}"
+"static void d3d11va_device_uninit(AVHWDeviceContext *hwdev)
+
+{
+
+    AVD3D11VADeviceContext *device_hwctx = hwdev->hwctx;
+
+
+
+    if (device_hwctx->device)
+
+        ID3D11Device_Release(device_hwctx->device);
+
+
+
+    if (device_hwctx->device_context)
+
+        ID3D11DeviceContext_Release(device_hwctx->device_context);
+
+
+
+    if (device_hwctx->video_device)
+
+        ID3D11VideoDevice_Release(device_hwctx->video_device);
+
+
+
+    if (device_hwctx->video_context)
+
+        ID3D11VideoContext_Release(device_hwctx->video_context);
+
+
+
+    if (device_hwctx->lock == d3d11va_default_lock)
+
+        CloseHandle(device_hwctx->lock_ctx);
+
+}"
+"int ff_get_wav_header(AVFormatContext *s, AVIOContext *pb,
+
+                      AVCodecContext *codec, int size, int big_endian)
+
+{
+
+    int id;
+
+    uint64_t bitrate;
+
+
+
+    if (size < 14) {
+
+        avpriv_request_sample(codec, ""wav header size < 14"");
+
+        return AVERROR_INVALIDDATA;
+
+    }
+
+
+
+    codec->codec_type  = AVMEDIA_TYPE_AUDIO;
+
+    if (!big_endian) {
+
+        id                 = avio_rl16(pb);
+
+        codec->channels    = avio_rl16(pb);
+
+        codec->sample_rate = avio_rl32(pb);
+
+        bitrate            = avio_rl32(pb) * 8;
+
+        codec->block_align = avio_rl16(pb);
+
+    } else {
+
+        id                 = avio_rb16(pb);
+
+        codec->channels    = avio_rb16(pb);
+
+        codec->sample_rate = avio_rb32(pb);
+
+        bitrate            = avio_rb32(pb) * 8;
+
+        codec->block_align = avio_rb16(pb);
+
+    }
+
+    if (size == 14) {  /* We're dealing with plain vanilla WAVEFORMAT */
+
+        codec->bits_per_coded_sample = 8;
+
+    } else {
+
+        if (!big_endian) {
+
+            codec->bits_per_coded_sample = avio_rl16(pb);
+
+        } else {
+
+            codec->bits_per_coded_sample = avio_rb16(pb);
+
+        }
+
+    }
+
+    if (id == 0xFFFE) {
+
+        codec->codec_tag = 0;
+
+    } else {
+
+        codec->codec_tag = id;
+
+        codec->codec_id  = ff_wav_codec_get_id(id,
+
+                                               codec->bits_per_coded_sample);
+
+    }
+
+    if (size >= 18) {  /* We're obviously dealing with WAVEFORMATEX */
+
+        int cbSize = avio_rl16(pb); /* cbSize */
+
+        if (big_endian) {
+
+            avpriv_report_missing_feature(codec, ""WAVEFORMATEX support for RIFX files\n"");
+
+            return AVERROR_PATCHWELCOME;
+
+        }
+
+        size  -= 18;
+
+        cbSize = FFMIN(size, cbSize);
+
+        if (cbSize >= 22 && id == 0xfffe) { /* WAVEFORMATEXTENSIBLE */
+
+            parse_waveformatex(pb, codec);
+
+            cbSize -= 22;
+
+            size   -= 22;
+
+        }
+
+        if (cbSize > 0) {
+
+            av_freep(&codec->extradata);
+
+            if (ff_get_extradata(codec, pb, cbSize) < 0)
+
+                return AVERROR(ENOMEM);
+
+            size -= cbSize;
+
+        }
+
+
+
+        /* It is possible for the chunk to contain garbage at the end */
+
+        if (size > 0)
+
+            avio_skip(pb, size);
+
+    }
+
+
+
+    if (bitrate > INT_MAX) {
+
+        if (s->error_recognition & AV_EF_EXPLODE) {
+
+            av_log(s, AV_LOG_ERROR,
+
+                   ""The bitrate %""PRIu64"" is too large.\n"",
+
+                    bitrate);
+
+            return AVERROR_INVALIDDATA;
+
+        } else {
+
+            av_log(s, AV_LOG_WARNING,
+
+                   ""The bitrate %""PRIu64"" is too large, resetting to 0."",
+
+                   bitrate);
+
+            codec->bit_rate = 0;
+
+        }
+
+    } else {
+
+        codec->bit_rate = bitrate;
+
+    }
+
+
+
+    if (codec->sample_rate <= 0) {
+
+        av_log(s, AV_LOG_ERROR,
+
+               ""Invalid sample rate: %d\n"", codec->sample_rate);
+
+        return AVERROR_INVALIDDATA;
+
+    }
+
+    if (codec->codec_id == AV_CODEC_ID_AAC_LATM) {
+
+        /* Channels and sample_rate values are those prior to applying SBR
+
+         * and/or PS. */
+
+        codec->channels    = 0;
+
+        codec->sample_rate = 0;
+
+    }
+
+    /* override bits_per_coded_sample for G.726 */
+
+    if (codec->codec_id == AV_CODEC_ID_ADPCM_G726 && codec->sample_rate)
+
+        codec->bits_per_coded_sample = codec->bit_rate / codec->sample_rate;
+
+
+
+    return 0;
+
+}"
+"static void test_acpi_asl(test_data *data)
+
+{
+
+    int i;
+
+    AcpiSdtTable *sdt, *exp_sdt;
+
+    test_data exp_data;
+
+    gboolean exp_err, err;
+
+
+
+    memset(&exp_data, 0, sizeof(exp_data));
+
+    exp_data.tables = load_expected_aml(data);
+
+    dump_aml_files(data, false);
+
+    for (i = 0; i < data->tables->len; ++i) {
+
+        GString *asl, *exp_asl;
+
+
+
+        sdt = &g_array_index(data->tables, AcpiSdtTable, i);
+
+        exp_sdt = &g_array_index(exp_data.tables, AcpiSdtTable, i);
+
+
+
+        err = load_asl(data->tables, sdt);
+
+        asl = normalize_asl(sdt->asl);
+
+
+
+        exp_err = load_asl(exp_data.tables, exp_sdt);
+
+        exp_asl = normalize_asl(exp_sdt->asl);
+
+
+
+        /* TODO: check for warnings */
+
+        g_assert(!err || exp_err);
+
+
+
+        if (g_strcmp0(asl->str, exp_asl->str)) {
+
+            uint32_t signature = cpu_to_le32(exp_sdt->header.signature);
+
+            sdt->tmp_files_retain = true;
+
+            exp_sdt->tmp_files_retain = true;
+
+            fprintf(stderr,
+
+                    ""acpi-test: Warning! %.4s mismatch. ""
+
+                    ""Actual [asl:%s, aml:%s], Expected [asl:%s, aml:%s].\n"",
+
+                    (gchar *)&signature,
+
+                    sdt->asl_file, sdt->aml_file,
+
+                    exp_sdt->asl_file, exp_sdt->aml_file);
+
+        }
+
+        g_string_free(asl, true);
+
+        g_string_free(exp_asl, true);
+
+    }
+
+
+
+    free_test_data(&exp_data);
+
+}"
+"static int matroska_parse_laces(MatroskaDemuxContext *matroska, uint8_t **buf,
+
+                                int size, int type,
+
+                                uint32_t **lace_buf, int *laces)
+
+{
+
+    int res = 0, n;
+
+    uint8_t *data = *buf;
+
+    uint32_t *lace_size;
+
+
+
+    if (!type) {
+
+        *laces = 1;
+
+        *lace_buf = av_mallocz(sizeof(int));
+
+        if (!*lace_buf)
+
+            return AVERROR(ENOMEM);
+
+
+
+        *lace_buf[0] = size;
+
+        return 0;
+
+    }
+
+
+
+    assert(size > 0);
+
+    *laces = *data + 1;
+
+    data += 1;
+
+    size -= 1;
+
+    lace_size = av_mallocz(*laces * sizeof(int));
+
+    if (!lace_size)
+
+        return AVERROR(ENOMEM);
+
+
+
+    switch (type) {
+
+    case 0x1: /* Xiph lacing */ {
+
+        uint8_t temp;
+
+        uint32_t total = 0;
+
+        for (n = 0; res == 0 && n < *laces - 1; n++) {
+
+            while (1) {
+
+                if (size == 0) {
+
+                    res = AVERROR_EOF;
+
+                    break;
+
+                }
+
+                temp = *data;
+
+                lace_size[n] += temp;
+
+                data += 1;
+
+                size -= 1;
+
+                if (temp != 0xff)
+
+                    break;
+
+            }
+
+            total += lace_size[n];
+
+        }
+
+        if (size <= total) {
+
+            res = AVERROR_INVALIDDATA;
+
+            break;
+
+        }
+
+
+
+        lace_size[n] = size - total;
+
+        break;
+
+    }
+
+
+
+    case 0x2: /* fixed-size lacing */
+
+        if (size != (size / *laces) * size) {
+
+            res = AVERROR_INVALIDDATA;
+
+            break;
+
+        }
+
+        for (n = 0; n < *laces; n++)
+
+            lace_size[n] = size / *laces;
+
+        break;
+
+
+
+    case 0x3: /* EBML lacing */ {
+
+        uint64_t num;
+
+        uint32_t total;
+
+        n = matroska_ebmlnum_uint(matroska, data, size, &num);
+
+        if (n < 0) {
+
+            av_log(matroska->ctx, AV_LOG_INFO,
+
+                   ""EBML block data error\n"");
+
+            res = n;
+
+            break;
+
+        }
+
+        data += n;
+
+        size -= n;
+
+        total = lace_size[0] = num;
+
+        for (n = 1; res == 0 && n < *laces - 1; n++) {
+
+            int64_t snum;
+
+            int r;
+
+            r = matroska_ebmlnum_sint(matroska, data, size, &snum);
+
+            if (r < 0) {
+
+                av_log(matroska->ctx, AV_LOG_INFO,
+
+                       ""EBML block data error\n"");
+
+                res = r;
+
+                break;
+
+            }
+
+            data += r;
+
+            size -= r;
+
+            lace_size[n] = lace_size[n - 1] + snum;
+
+            total += lace_size[n];
+
+        }
+
+        if (size <= total) {
+
+            res = AVERROR_INVALIDDATA;
+
+            break;
+
+        }
+
+        lace_size[*laces - 1] = size - total;
+
+        break;
+
+    }
+
+    }
+
+
+
+    *buf      = data;
+
+    *lace_buf = lace_size;
+
+
+
+    return res;
+
+}"
+"static int parse_picture_segment(AVCodecContext *avctx,
+
+                                  const uint8_t *buf, int buf_size)
+
+{
+
+    PGSSubContext *ctx = avctx->priv_data;
+
+
+
+    uint8_t sequence_desc;
+
+    unsigned int rle_bitmap_len, width, height;
+
+
+
+    if (buf_size <= 4)
+
+        return -1;
+
+    buf_size -= 4;
+
+
+
+    /* skip 3 unknown bytes: Object ID (2 bytes), Version Number */
+
+    buf += 3;
+
+
+
+    /* Read the Sequence Description to determine if start of RLE data or appended to previous RLE */
+
+    sequence_desc = bytestream_get_byte(&buf);
+
+
+
+    if (!(sequence_desc & 0x80)) {
+
+        /* Additional RLE data */
+
+        if (buf_size > ctx->picture.rle_remaining_len)
+
+            return -1;
+
+
+
+        memcpy(ctx->picture.rle + ctx->picture.rle_data_len, buf, buf_size);
+
+        ctx->picture.rle_data_len += buf_size;
+
+        ctx->picture.rle_remaining_len -= buf_size;
+
+
+
+        return 0;
+
+    }
+
+
+
+    if (buf_size <= 7)
+
+        return -1;
+
+    buf_size -= 7;
+
+
+
+    /* Decode rle bitmap length, stored size includes width/height data */
+
+    rle_bitmap_len = bytestream_get_be24(&buf) - 2*2;
+
+
+
+    /* Get bitmap dimensions from data */
+
+    width  = bytestream_get_be16(&buf);
+
+    height = bytestream_get_be16(&buf);
+
+
+
+    /* Make sure the bitmap is not too large */
+
+    if (avctx->width < width || avctx->height < height) {
+
+        av_log(avctx, AV_LOG_ERROR, ""Bitmap dimensions larger than video.\n"");
+
+        return -1;
+
+    }
+
+
+
+    ctx->picture.w = width;
+
+    ctx->picture.h = height;
+
+
+
+    av_fast_malloc(&ctx->picture.rle, &ctx->picture.rle_buffer_size, rle_bitmap_len);
+
+
+
+    if (!ctx->picture.rle)
+
+        return -1;
+
+
+
+    memcpy(ctx->picture.rle, buf, buf_size);
+
+    ctx->picture.rle_data_len = buf_size;
+
+    ctx->picture.rle_remaining_len = rle_bitmap_len - buf_size;
+
+
+
+    return 0;
+
+}"
+"void hmp_info_io_apic(Monitor *mon, const QDict *qdict)
+
+{
+
+    if (kvm_irqchip_in_kernel()) {
+
+        kvm_ioapic_dump_state(mon, qdict);
+
+    } else {
+
+        ioapic_dump_state(mon, qdict);
+
+    }
+
+}"
+"static av_cold int split_init(AVFilterContext *ctx)
+
+{
+
+    SplitContext *s = ctx->priv;
+
+    int i;
+
+
+
+    for (i = 0; i < s->nb_outputs; i++) {
+
+        char name[32];
+
+        AVFilterPad pad = { 0 };
+
+
+
+        snprintf(name, sizeof(name), ""output%d"", i);
+
+        pad.type = ctx->filter->inputs[0].type;
+
+        pad.name = av_strdup(name);
+
+        if (!pad.name)
+
+            return AVERROR(ENOMEM);
+
+
+
+        ff_insert_outpad(ctx, i, &pad);
+
+    }
+
+
+
+    return 0;
+
+}"
+"static void ppc_spapr_init(QEMUMachineInitArgs *args)
+
+{
+
+    ram_addr_t ram_size = args->ram_size;
+
+    const char *cpu_model = args->cpu_model;
+
+    const char *kernel_filename = args->kernel_filename;
+
+    const char *kernel_cmdline = args->kernel_cmdline;
+
+    const char *initrd_filename = args->initrd_filename;
+
+    const char *boot_device = args->boot_order;
+
+    PowerPCCPU *cpu;
+
+    CPUPPCState *env;
+
+    PCIHostState *phb;
+
+    int i;
+
+    MemoryRegion *sysmem = get_system_memory();
+
+    MemoryRegion *ram = g_new(MemoryRegion, 1);
+
+    hwaddr rma_alloc_size;
+
+    uint32_t initrd_base = 0;
+
+    long kernel_size = 0, initrd_size = 0;
+
+    long load_limit, rtas_limit, fw_size;
+
+    bool kernel_le = false;
+
+    char *filename;
+
+
+
+    msi_supported = true;
+
+
+
+    spapr = g_malloc0(sizeof(*spapr));
+
+    QLIST_INIT(&spapr->phbs);
+
+
+
+    cpu_ppc_hypercall = emulate_spapr_hypercall;
+
+
+
+    /* Allocate RMA if necessary */
+
+    rma_alloc_size = kvmppc_alloc_rma(""ppc_spapr.rma"", sysmem);
+
+
+
+    if (rma_alloc_size == -1) {
+
+        hw_error(""qemu: Unable to create RMA\n"");
+
+        exit(1);
+
+    }
+
+
+
+    if (rma_alloc_size && (rma_alloc_size < ram_size)) {
+
+        spapr->rma_size = rma_alloc_size;
+
+    } else {
+
+        spapr->rma_size = ram_size;
+
+
+
+        /* With KVM, we don't actually know whether KVM supports an
+
+         * unbounded RMA (PR KVM) or is limited by the hash table size
+
+         * (HV KVM using VRMA), so we always assume the latter
+
+         *
+
+         * In that case, we also limit the initial allocations for RTAS
+
+         * etc... to 256M since we have no way to know what the VRMA size
+
+         * is going to be as it depends on the size of the hash table
+
+         * isn't determined yet.
+
+         */
+
+        if (kvm_enabled()) {
+
+            spapr->vrma_adjust = 1;
+
+            spapr->rma_size = MIN(spapr->rma_size, 0x10000000);
+
+        }
+
+    }
+
+
+
+    /* We place the device tree and RTAS just below either the top of the RMA,
+
+     * or just below 2GB, whichever is lowere, so that it can be
+
+     * processed with 32-bit real mode code if necessary */
+
+    rtas_limit = MIN(spapr->rma_size, 0x80000000);
+
+    spapr->rtas_addr = rtas_limit - RTAS_MAX_SIZE;
+
+    spapr->fdt_addr = spapr->rtas_addr - FDT_MAX_SIZE;
+
+    load_limit = spapr->fdt_addr - FW_OVERHEAD;
+
+
+
+    /* We aim for a hash table of size 1/128 the size of RAM.  The
+
+     * normal rule of thumb is 1/64 the size of RAM, but that's much
+
+     * more than needed for the Linux guests we support. */
+
+    spapr->htab_shift = 18; /* Minimum architected size */
+
+    while (spapr->htab_shift <= 46) {
+
+        if ((1ULL << (spapr->htab_shift + 7)) >= ram_size) {
+
+            break;
+
+        }
+
+        spapr->htab_shift++;
+
+    }
+
+
+
+    /* Set up Interrupt Controller before we create the VCPUs */
+
+    spapr->icp = xics_system_init(smp_cpus * kvmppc_smt_threads() / smp_threads,
+
+                                  XICS_IRQS);
+
+    spapr->next_irq = XICS_IRQ_BASE;
+
+
+
+    /* init CPUs */
+
+    if (cpu_model == NULL) {
+
+        cpu_model = kvm_enabled() ? ""host"" : ""POWER7"";
+
+    }
+
+    for (i = 0; i < smp_cpus; i++) {
+
+        cpu = cpu_ppc_init(cpu_model);
+
+        if (cpu == NULL) {
+
+            fprintf(stderr, ""Unable to find PowerPC CPU definition\n"");
+
+            exit(1);
+
+        }
+
+        env = &cpu->env;
+
+
+
+        xics_cpu_setup(spapr->icp, cpu);
+
+
+
+        /* Set time-base frequency to 512 MHz */
+
+        cpu_ppc_tb_init(env, TIMEBASE_FREQ);
+
+
+
+        /* PAPR always has exception vectors in RAM not ROM. To ensure this,
+
+         * MSR[IP] should never be set.
+
+         */
+
+        env->msr_mask &= ~(1 << 6);
+
+
+
+        /* Tell KVM that we're in PAPR mode */
+
+        if (kvm_enabled()) {
+
+            kvmppc_set_papr(cpu);
+
+        }
+
+
+
+        qemu_register_reset(spapr_cpu_reset, cpu);
+
+    }
+
+
+
+    /* allocate RAM */
+
+    spapr->ram_limit = ram_size;
+
+    if (spapr->ram_limit > rma_alloc_size) {
+
+        ram_addr_t nonrma_base = rma_alloc_size;
+
+        ram_addr_t nonrma_size = spapr->ram_limit - rma_alloc_size;
+
+
+
+        memory_region_init_ram(ram, NULL, ""ppc_spapr.ram"", nonrma_size);
+
+        vmstate_register_ram_global(ram);
+
+        memory_region_add_subregion(sysmem, nonrma_base, ram);
+
+    }
+
+
+
+    filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, ""spapr-rtas.bin"");
+
+    spapr->rtas_size = load_image_targphys(filename, spapr->rtas_addr,
+
+                                           rtas_limit - spapr->rtas_addr);
+
+    if (spapr->rtas_size < 0) {
+
+        hw_error(""qemu: could not load LPAR rtas '%s'\n"", filename);
+
+        exit(1);
+
+    }
+
+    if (spapr->rtas_size > RTAS_MAX_SIZE) {
+
+        hw_error(""RTAS too big ! 0x%lx bytes (max is 0x%x)\n"",
+
+                 spapr->rtas_size, RTAS_MAX_SIZE);
+
+        exit(1);
+
+    }
+
+    g_free(filename);
+
+
+
+    /* Set up EPOW events infrastructure */
+
+    spapr_events_init(spapr);
+
+
+
+    /* Set up VIO bus */
+
+    spapr->vio_bus = spapr_vio_bus_init();
+
+
+
+    for (i = 0; i < MAX_SERIAL_PORTS; i++) {
+
+        if (serial_hds[i]) {
+
+            spapr_vty_create(spapr->vio_bus, serial_hds[i]);
+
+        }
+
+    }
+
+
+
+    /* We always have at least the nvram device on VIO */
+
+    spapr_create_nvram(spapr);
+
+
+
+    /* Set up PCI */
+
+    spapr_pci_msi_init(spapr, SPAPR_PCI_MSI_WINDOW);
+
+    spapr_pci_rtas_init();
+
+
+
+    phb = spapr_create_phb(spapr, 0);
+
+
+
+    for (i = 0; i < nb_nics; i++) {
+
+        NICInfo *nd = &nd_table[i];
+
+
+
+        if (!nd->model) {
+
+            nd->model = g_strdup(""ibmveth"");
+
+        }
+
+
+
+        if (strcmp(nd->model, ""ibmveth"") == 0) {
+
+            spapr_vlan_create(spapr->vio_bus, nd);
+
+        } else {
+
+            pci_nic_init_nofail(&nd_table[i], phb->bus, nd->model, NULL);
+
+        }
+
+    }
+
+
+
+    for (i = 0; i <= drive_get_max_bus(IF_SCSI); i++) {
+
+        spapr_vscsi_create(spapr->vio_bus);
+
+    }
+
+
+
+    /* Graphics */
+
+    if (spapr_vga_init(phb->bus)) {
+
+        spapr->has_graphics = true;
+
+    }
+
+
+
+    if (usb_enabled(spapr->has_graphics)) {
+
+        pci_create_simple(phb->bus, -1, ""pci-ohci"");
+
+        if (spapr->has_graphics) {
+
+            usbdevice_create(""keyboard"");
+
+            usbdevice_create(""mouse"");
+
+        }
+
+    }
+
+
+
+    if (spapr->rma_size < (MIN_RMA_SLOF << 20)) {
+
+        fprintf(stderr, ""qemu: pSeries SLOF firmware requires >= ""
+
+                ""%ldM guest RMA (Real Mode Area memory)\n"", MIN_RMA_SLOF);
+
+        exit(1);
+
+    }
+
+
+
+    if (kernel_filename) {
+
+        uint64_t lowaddr = 0;
+
+
+
+        kernel_size = load_elf(kernel_filename, translate_kernel_address, NULL,
+
+                               NULL, &lowaddr, NULL, 1, ELF_MACHINE, 0);
+
+        if (kernel_size < 0) {
+
+            kernel_size = load_elf(kernel_filename,
+
+                                   translate_kernel_address, NULL,
+
+                                   NULL, &lowaddr, NULL, 0, ELF_MACHINE, 0);
+
+            kernel_le = kernel_size > 0;
+
+        }
+
+        if (kernel_size < 0) {
+
+            kernel_size = load_image_targphys(kernel_filename,
+
+                                              KERNEL_LOAD_ADDR,
+
+                                              load_limit - KERNEL_LOAD_ADDR);
+
+        }
+
+        if (kernel_size < 0) {
+
+            fprintf(stderr, ""qemu: could not load kernel '%s'\n"",
+
+                    kernel_filename);
+
+            exit(1);
+
+        }
+
+
+
+        /* load initrd */
+
+        if (initrd_filename) {
+
+            /* Try to locate the initrd in the gap between the kernel
+
+             * and the firmware. Add a bit of space just in case
+
+             */
+
+            initrd_base = (KERNEL_LOAD_ADDR + kernel_size + 0x1ffff) & ~0xffff;
+
+            initrd_size = load_image_targphys(initrd_filename, initrd_base,
+
+                                              load_limit - initrd_base);
+
+            if (initrd_size < 0) {
+
+                fprintf(stderr, ""qemu: could not load initial ram disk '%s'\n"",
+
+                        initrd_filename);
+
+                exit(1);
+
+            }
+
+        } else {
+
+            initrd_base = 0;
+
+            initrd_size = 0;
+
+        }
+
+    }
+
+
+
+    if (bios_name == NULL) {
+
+        bios_name = FW_FILE_NAME;
+
+    }
+
+    filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
+
+    fw_size = load_image_targphys(filename, 0, FW_MAX_SIZE);
+
+    if (fw_size < 0) {
+
+        hw_error(""qemu: could not load LPAR rtas '%s'\n"", filename);
+
+        exit(1);
+
+    }
+
+    g_free(filename);
+
+
+
+    spapr->entry_point = 0x100;
+
+
+
+    vmstate_register(NULL, 0, &vmstate_spapr, spapr);
+
+    register_savevm_live(NULL, ""spapr/htab"", -1, 1,
+
+                         &savevm_htab_handlers, spapr);
+
+
+
+    /* Prepare the device tree */
+
+    spapr->fdt_skel = spapr_create_fdt_skel(cpu_model,
+
+                                            initrd_base, initrd_size,
+
+                                            kernel_size, kernel_le,
+
+                                            boot_device, kernel_cmdline,
+
+                                            spapr->epow_irq);
+
+    assert(spapr->fdt_skel != NULL);
+
+}"
+"static void ide_set_signature(IDEState *s)
+
+{
+
+    s->select &= 0xf0; /* clear head */
+
+    /* put signature */
+
+    s->nsector = 1;
+
+    s->sector = 1;
+
+    if (s->drive_kind == IDE_CD) {
+
+        s->lcyl = 0x14;
+
+        s->hcyl = 0xeb;
+
+    } else if (s->bs) {
+
+        s->lcyl = 0;
+
+        s->hcyl = 0;
+
+    } else {
+
+        s->lcyl = 0xff;
+
+        s->hcyl = 0xff;
+
+    }
+
+}"
+"void isa_mmio_init(target_phys_addr_t base, target_phys_addr_t size)
+
+{
+
+    MemoryRegion *mr = g_malloc(sizeof(*mr));
+
+
+
+    isa_mmio_setup(mr, size);
+
+    memory_region_add_subregion(get_system_memory(), base, mr);
+
+}"
+"static int find_allocation(BlockDriverState *bs, off_t start,
+
+                           off_t *data, off_t *hole)
+
+{
+
+    BDRVGlusterState *s = bs->opaque;
+
+    off_t offs;
+
+
+
+    if (!s->supports_seek_data) {
+
+        return -ENOTSUP;
+
+    }
+
+
+
+    /*
+
+     * SEEK_DATA cases:
+
+     * D1. offs == start: start is in data
+
+     * D2. offs > start: start is in a hole, next data at offs
+
+     * D3. offs < 0, errno = ENXIO: either start is in a trailing hole
+
+     *                              or start is beyond EOF
+
+     *     If the latter happens, the file has been truncated behind
+
+     *     our back since we opened it.  All bets are off then.
+
+     *     Treating like a trailing hole is simplest.
+
+     * D4. offs < 0, errno != ENXIO: we learned nothing
+
+     */
+
+    offs = glfs_lseek(s->fd, start, SEEK_DATA);
+
+    if (offs < 0) {
+
+        return -errno;          /* D3 or D4 */
+
+    }
+
+    assert(offs >= start);
+
+
+
+    if (offs > start) {
+
+        /* D2: in hole, next data at offs */
+
+        *hole = start;
+
+        *data = offs;
+
+        return 0;
+
+    }
+
+
+
+    /* D1: in data, end not yet known */
+
+
+
+    /*
+
+     * SEEK_HOLE cases:
+
+     * H1. offs == start: start is in a hole
+
+     *     If this happens here, a hole has been dug behind our back
+
+     *     since the previous lseek().
+
+     * H2. offs > start: either start is in data, next hole at offs,
+
+     *                   or start is in trailing hole, EOF at offs
+
+     *     Linux treats trailing holes like any other hole: offs ==
+
+     *     start.  Solaris seeks to EOF instead: offs > start (blech).
+
+     *     If that happens here, a hole has been dug behind our back
+
+     *     since the previous lseek().
+
+     * H3. offs < 0, errno = ENXIO: start is beyond EOF
+
+     *     If this happens, the file has been truncated behind our
+
+     *     back since we opened it.  Treat it like a trailing hole.
+
+     * H4. offs < 0, errno != ENXIO: we learned nothing
+
+     *     Pretend we know nothing at all, i.e. ""forget"" about D1.
+
+     */
+
+    offs = glfs_lseek(s->fd, start, SEEK_HOLE);
+
+    if (offs < 0) {
+
+        return -errno;          /* D1 and (H3 or H4) */
+
+    }
+
+    assert(offs >= start);
+
+
+
+    if (offs > start) {
+
+        /*
+
+         * D1 and H2: either in data, next hole at offs, or it was in
+
+         * data but is now in a trailing hole.  In the latter case,
+
+         * all bets are off.  Treating it as if it there was data all
+
+         * the way to EOF is safe, so simply do that.
+
+         */
+
+        *data = start;
+
+        *hole = offs;
+
+        return 0;
+
+    }
+
+
+
+    /* D1 and H1 */
+
+    return -EBUSY;
+
+}"
+"static void test_validate_struct_nested(TestInputVisitorData *data,
+
+                                         const void *unused)
+
+{
+
+    UserDefTwo *udp = NULL;
+
+    Visitor *v;
+
+
+
+    v = validate_test_init(data, ""{ 'string0': 'string0', ""
+
+                           ""'dict1': { 'string1': 'string1', ""
+
+                           ""'dict2': { 'userdef': { 'integer': 42, ""
+
+                           ""'string': 'string' }, 'string': 'string2'}}}"");
+
+
+
+    visit_type_UserDefTwo(v, NULL, &udp, &error_abort);
+
+    qapi_free_UserDefTwo(udp);
+
+}"
+"void v9fs_device_unrealize_common(V9fsState *s, Error **errp)
+
+{
+
+    g_free(s->ctx.fs_root);
+
+    g_free(s->tag);
+
+}"
+"static int copy_moof(AVFormatContext *s, const char* infile, const char *outfile, int64_t size)
+
+{
+
+    AVIOContext *in, *out;
+
+    int ret = 0;
+
+    if ((ret = avio_open2(&in, infile, AVIO_FLAG_READ, &s->interrupt_callback, NULL)) < 0)
+
+        return ret;
+
+    if ((ret = avio_open2(&out, outfile, AVIO_FLAG_WRITE, &s->interrupt_callback, NULL)) < 0) {
+
+        avio_close(in);
+
+        return ret;
+
+    }
+
+    while (size > 0) {
+
+        uint8_t buf[8192];
+
+        int n = FFMIN(size, sizeof(buf));
+
+        n = avio_read(in, buf, n);
+
+        if (n <= 0) {
+
+            ret = AVERROR(EIO);
+
+            break;
+
+        }
+
+        avio_write(out, buf, n);
+
+        size -= n;
+
+    }
+
+    avio_flush(out);
+
+    avio_close(out);
+
+    avio_close(in);
+
+    return ret;
+
+}"
