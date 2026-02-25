@@ -1,4 +1,4 @@
-# GRACE-IRFusion
+# GRACE-Enhanced
 
 An enhanced version of GRACE for software vulnerability detection using hybrid retrieval fusion.
 
