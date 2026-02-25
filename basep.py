@@ -12,7 +12,7 @@ openai.api_key = ""
 templates = {
     1: 'In the above code snippet, check for potential security vulnerabilities and output either \'Vulnerable\' or \'Non-vulnerable\'. '
        'You are now an excellent programmer.'
-       'You are conducting a function vulnerability detection task for C/C++ language.',
+       'You are conducting a function vulnerability detection task for Java language.',
     2: 'The node information of the function is as follows:',
     3: 'The edge information of the function is as follows:',
     4: 'Here is an example for you to learn from:'
