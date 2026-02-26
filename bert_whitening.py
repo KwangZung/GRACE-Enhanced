@@ -55,11 +55,12 @@ def compute_whitening(vecs):
     mu = np.mean(vecs, axis=0, keepdims=True)
     X = vecs - mu
 
-    cov = np.dot(X.T, X)
+    cov = np.dot(X.T, X) / X.shape[0]
 
     U, S, Vt = np.linalg.svd(cov)
 
     # Tránh chia cho 0
-    W = np.dot(U, np.diag(1.0 / np.sqrt(S + 1e-12)))
+    k = 256
+    W = np.dot(U[:, :k], np.diag(1.0 / np.sqrt(S[:k] + 1e-12)))
 
     return W, -mu
