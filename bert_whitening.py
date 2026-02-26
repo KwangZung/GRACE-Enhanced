@@ -32,7 +32,7 @@ def sents_to_vecs(sents, tokenizer, model, max_len=512):
         
     return vecs
 
-def transform_and_normalize(vecs, kernel=None, bias=None):
+def transform_and_normalize(vecs, kernel, bias):
     """
     Áp dụng biến đổi Whitening (nếu có kernel/bias) và chuẩn hóa vector.
     Công thức: y = (x + bias).dot(kernel)
@@ -44,3 +44,22 @@ def transform_and_normalize(vecs, kernel=None, bias=None):
     # Tránh chia cho 0
     norms = (vecs**2).sum(axis=1, keepdims=True)**0.5
     return vecs / (norms + 1e-8)
+
+def compute_whitening(vecs):
+    """
+    vecs: numpy array (N, D)
+    Trả về:
+        kernel (D, D)
+        bias (1, D)
+    """
+    mu = np.mean(vecs, axis=0, keepdims=True)
+    X = vecs - mu
+
+    cov = np.dot(X.T, X)
+
+    U, S, Vt = np.linalg.svd(cov)
+
+    # Tránh chia cho 0
+    W = np.dot(U, np.diag(1.0 / np.sqrt(S + 1e-12)))
+
+    return W, -mu
