@@ -10,7 +10,7 @@ import pandas as pd
 from huggingface_hub import hf_hub_download
 import json
 
-from bert_whitening import sents_to_vecs, transform_and_normalize
+from bert_whitening import sents_to_vecs, transform_and_normalize, compute_whitening
 
 # ==========================================
 # 1. SETUP TOKENIZER & MODEL
@@ -79,7 +79,9 @@ class Retrieval(object):
         
         all_vecs = np.concatenate(all_vecs, 0)
         print("Normalizing vectors (Whitening)...")
-        all_vecs = transform_and_normalize(all_vecs)
+        self.kernel, self.bias = compute_whitening(all_vecs)
+        print("Compute Whitening")
+        all_vecs = transform_and_normalize(all_vecs, self.kernel, self.bias)
         
         self.id2text = {idx: text for idx, text in zip(all_ids, all_texts)}
         self.vecs = np.array(all_vecs, dtype="float32")
@@ -95,7 +97,7 @@ class Retrieval(object):
     def single_query(self, code, ast, topK=10):
         # 1. SEMANTIC (DENSE RETRIEVAL)
         body = sents_to_vecs([code], tokenizer, model)
-        body = transform_and_normalize(body)
+        body = transform_and_normalize(body, self.kernel, self.bias)
         vec = body[[0]].reshape(1, -1).astype('float32')
         
         # FAISS trả về topK (mặc định lấy nhiều hơn 1 chút để RRF có không gian xếp hạng)
