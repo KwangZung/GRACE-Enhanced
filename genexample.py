@@ -88,6 +88,7 @@ class Retrieval(object):
         self.ids = np.array(all_ids, dtype="int64")
 
     def build_index(self, n_list):
+        dim = self.vecs.shape[1]
         quant = faiss.IndexFlatIP(dim)
         index = faiss.IndexIVFFlat(quant, dim, min(n_list, self.vecs.shape[0]))
         index.train(self.vecs)
