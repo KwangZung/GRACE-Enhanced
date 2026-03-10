@@ -37,22 +37,39 @@ model.to(DEVICE)
 dim = 768
 
 # ==========================================
-# 2. LOAD JAVA DATASET (Sanity Check)
+# 2. LOAD TRAIN & TEST DATASETS
 # ==========================================
-print("Loading Java dataset...")
-# Đọc file AST
-df_ast = pd.read_csv("data/java_ast.csv", header=None)
-train_ast_list = df_ast[0].fillna("").astype(str).tolist()
+print("Loading datasets...")
 
-# Đọc file Code từ JSON
-with open("data/java_processed.json", "r", encoding="utf-8") as f:
-    json_data = json.load(f)
-    train_code_list = [item.get("func", "") for item in json_data]
+# --- PHẦN 1: ĐỌC TẬP TRAIN (Xây dựng Kho FAISS) ---
+try:
+    df_ast_train = pd.read_csv("data/train_ast.csv", header=None)
+    train_ast_list = df_ast_train[0].fillna("").astype(str).tolist()
 
-# Tạm thời gán Test = Train để test luồng 75 hàm
-test_code_list = train_code_list
-test_ast_list = train_ast_list
-print(f"Loaded {len(train_code_list)} functions.")
+    with open("data/train_processed.json", "r", encoding="utf-8") as f:
+        json_data_train = json.load(f)
+        train_code_list = [item.get("func", "") for item in json_data_train]
+    print(f"✅ Đã nạp {len(train_code_list)} hàm TRAIN vào kho FAISS.")
+except Exception as e:
+    print(f"❌ Lỗi nạp tập Train: {e}. Vui lòng chạy lại file process_joern.py")
+    exit()
+
+# --- PHẦN 2: ĐỌC TẬP TEST (20 câu truy vấn CWE78) ---
+try:
+    df_ast_test = pd.read_csv("data/test_ast.csv", header=None)
+    test_ast_list = df_ast_test[0].fillna("").astype(str).tolist()
+
+    with open("data/test_processed.json", "r", encoding="utf-8") as f:
+        json_data_test = json.load(f)
+        test_code_list = [item.get("func", "") for item in json_data_test]
+    print(f"✅ Đã nạp {len(test_code_list)} hàm TEST để truy vấn.")
+except Exception as e:
+    print(f"❌ Lỗi nạp tập Test: {e}. Vui lòng chạy lại file process_joern.py")
+    exit()
+
+# Chốt chặn an toàn
+assert len(train_code_list) == len(train_ast_list), "LỖI: Số lượng Train Code và AST không khớp!"
+assert len(test_code_list) == len(test_ast_list), "LỖI: Số lượng Test Code và AST không khớp!"
 
 # ==========================================
 # 3. HYBRID RETRIEVAL (DENSE + SPARSE + RRF)
