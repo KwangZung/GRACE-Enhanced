@@ -2,15 +2,27 @@ import os
 import subprocess
 import json
 import pandas as pd
+import shutil
 
-JAVA_DIR = 'data/java_test'
-OUTPUT_JSON = 'data/java_processed.json'
-OUTPUT_AST_CSV = 'data/java_ast.csv'
+# ==========================================
+# CẤU HÌNH ĐƯỜNG DẪN TRAIN VÀ TEST
+# ==========================================
+CONFIG = {
+    "train": {
+        "input_dir": "data/java_train",       # Thư mục chứa code để huấn luyện/xây FAISS
+        "out_json": "data/train_processed.json",
+        "out_csv": "data/train_ast.csv"
+    },
+    "test": {
+        "input_dir": "data/java_test",        # Thư mục chứa code dùng làm câu truy vấn (Query)
+        "out_json": "data/test_processed.json",
+        "out_csv": "data/test_ast.csv"
+    }
+}
+
 JOERN_SCRIPT = 'batch_query.sc'
 
-def create_and_run_joern():
-    target_dir = JAVA_DIR
-    
+def create_and_run_joern(target_dir):
     script_content = r"""
     @main def exec() = {
         try {
@@ -27,7 +39,6 @@ def create_and_run_joern():
                     val astSeq = method.ast.map(_.label).l.mkString(" ")
                     val nodes = method.ast.map(n => "(" + n.id + ", " + n.label + ", " + n.code.replaceAll("\r\n|\r|\n", " ") + ")").l.mkString("; ")
                     
-                    // SỬA LỖI Ở ĐÂY: Đổi inNode thành dst (đích) và outNode thành src (nguồn) cho tương thích Joern FlatGraph
                     val edges = method.ast.outE.map(e => "(" + e.src.id + "->" + e.dst.id + ", " + e.label + ")").l.mkString("; ")
                     
                     println("RESULT_START|_SEP_|" + methodName + "|_SEP_|" + code + "|_SEP_|" + astSeq + "|_SEP_|" + nodes + "|_SEP_|" + edges + "|_SEP_|RESULT_END")
@@ -44,7 +55,7 @@ def create_and_run_joern():
     with open(JOERN_SCRIPT, 'w', encoding='utf-8') as f:
         f.write(script_content)
         
-    print(f"Đang khởi động Joern và phân tích thư mục {target_dir} ...")
+    print(f"⏳ Đang khởi động Joern và phân tích thư mục: {target_dir} ...")
     
     result = subprocess.run(
         ['joern', '--script', JOERN_SCRIPT], 
@@ -54,12 +65,13 @@ def create_and_run_joern():
     )
     return result.stdout, result.stderr
 
-def main():
-    if not os.path.exists(JAVA_DIR):
-        print(f"Lỗi: Không tìm thấy thư mục '{JAVA_DIR}'.")
+def process_directory(input_dir, out_json, out_csv):
+    """Hàm xử lý cho từng thư mục độc lập"""
+    if not os.path.exists(input_dir):
+        print(f"❌ Lỗi: Không tìm thấy thư mục '{input_dir}'. Bỏ qua khâu này.")
         return
 
-    stdout, stderr = create_and_run_joern()
+    stdout, stderr = create_and_run_joern(input_dir)
     
     processed_json_data = []
     ast_list = []
@@ -91,24 +103,29 @@ def main():
                 continue
 
     if len(processed_json_data) > 0:
-        pd.DataFrame(ast_list).to_csv(OUTPUT_AST_CSV, index=False, header=False)
-        with open(OUTPUT_JSON, 'w', encoding='utf-8') as f:
+        pd.DataFrame(ast_list).to_csv(out_csv, index=False, header=False)
+        with open(out_json, 'w', encoding='utf-8') as f:
             json.dump(processed_json_data, f, indent=4)
             
-        print(f"✅ THÀNH CÔNG! Đã trích xuất {len(processed_json_data)} hàm Java.")
+        print(f"✅ THÀNH CÔNG! Đã trích xuất {len(processed_json_data)} hàm và lưu vào {out_json}")
     else:
-        print("❌ LỖI TỪ JOERN. ĐÂY LÀ NGUYÊN NHÂN THỰC SỰ:")
-        print("========= STDERR (Lỗi chi tiết) =========")
-        print(stderr)
-        print("========= STDOUT (Kết quả in ra) =========")
-        print(stdout)
-        print("=======================================")
+        print(f"⚠️ Không có dữ liệu được trích xuất từ {input_dir}.")
+        print("Chi tiết lỗi (nếu có):", stderr[:500]) # Chỉ in 500 ký tự đầu cho đỡ rối
 
-    # Dọn dẹp file thừa
+def main():
+    # Chạy vòng lặp qua cả tập Train và Test
+    for split_name, paths in CONFIG.items():
+        print(f"\n{'='*50}")
+        print(f"🚀 BẮT ĐẦU XỬ LÝ TẬP DỮ LIỆU: {split_name.upper()}")
+        print(f"{'='*50}")
+        process_directory(paths["input_dir"], paths["out_json"], paths["out_csv"])
+
+    # Dọn dẹp chiến trường sau khi hoàn tất cả 2 tập
+    print("\n🧹 Đang dọn dẹp file tạm...")
     if os.path.exists(JOERN_SCRIPT): os.remove(JOERN_SCRIPT)
     if os.path.exists("workspace"): 
-        import shutil
         shutil.rmtree("workspace", ignore_errors=True)
+    print("🎉 Hoàn tất toàn bộ quy trình tiền xử lý!")
 
 if __name__ == "__main__":
     main()
