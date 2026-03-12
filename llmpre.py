@@ -6,8 +6,8 @@ import json
 import csv
 import logging
 
-openai.api_base = ""
-openai.api_key = ""
+openai.api_base = "https://api.groq.com/openai/v1"
+openai.api_key = "REMOVED_API_KEY"
 
 templates = {
     1: 'In the above code snippet, check for potential security vulnerabilities and output either \'Vulnerable\' or \'Non-vulnerable\'. '
@@ -29,7 +29,7 @@ logger.addHandler(fh)
 
 
 def main():
-    with open('F:/pycharmfile/vulllm/devign_data/devign_test_processed.json', 'r') as f:
+    with open('processed_for_llmpre.json', 'r') as f:
         data = json.load(f)
 
     def calculate_metrics(predictions, ground_truth):
@@ -69,7 +69,7 @@ def main():
 
 
             response = openai.ChatCompletion.create(
-                model="gpt-4",
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {"role": "user", "content": format(inputCode)+templates[1]+templates[2]+format(inputnode)+templates[3]+format(inputedge)+templates[4]+format(inputex)}
                 ]
