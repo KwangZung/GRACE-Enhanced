@@ -35,7 +35,8 @@ def create_and_run_joern(target_dir):
             cpg.method.internal.filterNot(m => m.name == "<init>" || m.name == "<clinit>").foreach { method =>
                 try {
                     val methodName = method.name
-                    val code = method.code.replaceAll("\r\n|\r|\n", " ")
+                    val bodyCode = method.ast.filter(n => n.label == "CALL" || n.label == "CONTROL_STRUCTURE" || n.label == "LOCAL").code.l.distinct.mkString(" ")
+                    val code = (method.code + " " + bodyCode).replaceAll("\r\n|\r|\n", " ").replaceAll("\"", "'")
                     val astSeq = method.ast.map(_.label).l.mkString(" ")
                     val nodes = method.ast.map(n => "(" + n.id + ", " + n.label + ", " + n.code.replaceAll("\r\n|\r|\n", " ") + ")").l.mkString("; ")
                     
