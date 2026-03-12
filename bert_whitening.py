@@ -24,11 +24,20 @@ def sents_to_vecs(sents, tokenizer, model, max_len=512):
     if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
         vecs = outputs.pooler_output.cpu().numpy()
     else:
-        # Lấy trung bình cộng (Mean Pooling) các token để làm vector đại diện
+        # Lấy hidden states từ CodeT5
         hidden_states = outputs.last_hidden_state
-        # Chú ý: Cần tính trung bình có trọng số dựa trên attention_mask để không tính padding
-        # Cách đơn giản:
-        vecs = torch.mean(hidden_states, dim=1).cpu().numpy()
+        
+        # Mở rộng attention_mask để khớp kích thước với hidden_states
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+        
+        # Nhân element-wise: Những token là <pad> (có mask=0) sẽ bị triệt tiêu thành số 0 hoàn toàn
+        sum_embeddings = torch.sum(hidden_states * input_mask_expanded, 1)
+        
+        # Đếm số lượng token thực tế của mỗi đoạn code (tránh lỗi chia cho 0)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        
+        # Tính trung bình cộng chính xác (Tổng các vector / Số lượng token thật)
+        vecs = (sum_embeddings / sum_mask).cpu().numpy()
         
     return vecs
 
