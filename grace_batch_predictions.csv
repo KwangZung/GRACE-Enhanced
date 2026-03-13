@@ -11,66 +11,66 @@ Query_Index,LLM_Response,Prediction,GroundTruth
 9,1 0 0,1,1
 10,1 0 0,0,0
 11,1 0 0,0,0
-12,"Case 1: The target function `public void good() throws Throwable this.goodG2B1() this.goodG2B2()` is identical to the provided Reference Example. The Reference Example is labeled `0 (Non-vulnerable)`. There is no direct OS command execution or untrusted input processing visible in this snippet. Therefore, the target is also non-vulnerable.  Case 2: The target function `public static void main(String[] args) throws ClassNotFoundException, InstantiationException, IllegalAccessException mainFromParent(args)` is identical to the provided Reference Example. The Reference Example is labeled `0 (Non-vulnerable)`. While `args` can be user-controlled, the reference indicates that this specific `main` method, including its call to `mainFromParent(args)`, does not lead to a CWE-78 vulnerability. Therefore, the target is also non-vulnerable.  Case 3: The target function `public void bad() throws Throwable ... data = readerBuffered.readLine()` reads data from a network socket (`socket.getInputStream()`) into the `data` variable. This makes `data` untrusted and attacker-controlled. While this specific `bad()` method does not contain the `Runtime.getRuntime().exec()` call (the actual sink for OS command injection), it is a clear *source* of tainted data. The Reference Example `goodG2BSink` shows a pattern where `Runtime.getRuntime().exec(osCommand + data)` is used, and its label `0` implies that the `data` reaching *that specific good sink* is safe. However, the target method is explicitly named `bad()`, which is a strong indicator in security test suites that it is part of a vulnerable flow. An elite security expert would identify this method as introducing attacker-controlled input that, if subsequently used in an OS command execution (like the pattern shown in `goodG2BSink`), would lead to a CWE-78 vulnerability. Therefore, this method is a critical component of a vulnerable chain.  0 0 1",0,0
-13,"Case 1: The target function `public void good() throws Throwable this.goodG2B1() this.goodG2B2()` is identical to the provided Reference Example. The Reference Example is labeled `0 (Non-vulnerable)`. There is no direct OS command execution or untrusted input processing visible in this snippet. Therefore, the target is also non-vulnerable.  Case 2: The target function `public static void main(String[] args) throws ClassNotFoundException, InstantiationException, IllegalAccessException mainFromParent(args)` is identical to the provided Reference Example. The Reference Example is labeled `0 (Non-vulnerable)`. While `args` can be user-controlled, the reference indicates that this specific `main` method, including its call to `mainFromParent(args)`, does not lead to a CWE-78 vulnerability. Therefore, the target is also non-vulnerable.  Case 3: The target function `public void bad() throws Throwable ... data = readerBuffered.readLine()` reads data from a network socket (`socket.getInputStream()`) into the `data` variable. This makes `data` untrusted and attacker-controlled. While this specific `bad()` method does not contain the `Runtime.getRuntime().exec()` call (the actual sink for OS command injection), it is a clear *source* of tainted data. The Reference Example `goodG2BSink` shows a pattern where `Runtime.getRuntime().exec(osCommand + data)` is used, and its label `0` implies that the `data` reaching *that specific good sink* is safe. However, the target method is explicitly named `bad()`, which is a strong indicator in security test suites that it is part of a vulnerable flow. An elite security expert would identify this method as introducing attacker-controlled input that, if subsequently used in an OS command execution (like the pattern shown in `goodG2BSink`), would lead to a CWE-78 vulnerability. Therefore, this method is a critical component of a vulnerable chain.  0 0 1",0,0
-14,"Case 1: The target function `public void good() throws Throwable this.goodG2B1() this.goodG2B2()` is identical to the provided Reference Example. The Reference Example is labeled `0 (Non-vulnerable)`. There is no direct OS command execution or untrusted input processing visible in this snippet. Therefore, the target is also non-vulnerable.  Case 2: The target function `public static void main(String[] args) throws ClassNotFoundException, InstantiationException, IllegalAccessException mainFromParent(args)` is identical to the provided Reference Example. The Reference Example is labeled `0 (Non-vulnerable)`. While `args` can be user-controlled, the reference indicates that this specific `main` method, including its call to `mainFromParent(args)`, does not lead to a CWE-78 vulnerability. Therefore, the target is also non-vulnerable.  Case 3: The target function `public void bad() throws Throwable ... data = readerBuffered.readLine()` reads data from a network socket (`socket.getInputStream()`) into the `data` variable. This makes `data` untrusted and attacker-controlled. While this specific `bad()` method does not contain the `Runtime.getRuntime().exec()` call (the actual sink for OS command injection), it is a clear *source* of tainted data. The Reference Example `goodG2BSink` shows a pattern where `Runtime.getRuntime().exec(osCommand + data)` is used, and its label `0` implies that the `data` reaching *that specific good sink* is safe. However, the target method is explicitly named `bad()`, which is a strong indicator in security test suites that it is part of a vulnerable flow. An elite security expert would identify this method as introducing attacker-controlled input that, if subsequently used in an OS command execution (like the pattern shown in `goodG2BSink`), would lead to a CWE-78 vulnerability. Therefore, this method is a critical component of a vulnerable chain.  0 0 1",1,1
-15,0 0 0,0,0
-16,0 0 0,0,0
-17,0 0 0,0,0
-18,0 1 0,0,0
-19,0 1 0,1,1
-20,0 1 0,0,0
-21,0 0 0,0,0
-22,0 0 0,0,0
-23,0 0 0,0,0
-24,1 0 0,1,1
-25,1 0 0,0,0
-26,1 0 0,0,0
-27,0 0 1,0,0
-28,0 0 1,0,0
-29,0 0 1,1,1
-30,0 0 0,0,0
-31,0 0 0,0,0
-32,0 0 0,0,0
-33,0 0 0,0,0
-34,0 0 0,0,0
-35,0 0 0,0,0
-36,1 0 0,1,1
-37,1 0 0,0,0
-38,1 0 0,0,0
-39,0 0 1,0,0
-40,0 0 1,0,0
-41,0 0 1,1,1
-42,0 0 0,0,0
-43,0 0 0,0,0
-44,0 0 0,0,0
-45,0 1 0,0,0
-46,0 1 0,1,1
-47,0 1 0,0,0
-48,0 0 0,0,0
-49,0 0 0,0,0
-50,0 0 0,0,0
-51,1 0 0,1,1
-52,1 0 0,0,0
-53,1 0 0,0,0
-54,0 0 1,0,0
-55,0 0 1,0,0
-56,0 0 1,1,1
-57,0 0 0,0,0
-58,0 0 0,0,0
-59,0 0 0,0,0
-60,1 0 0,1,1
-61,1 0 0,0,0
-62,1 0 0,0,0
-63,0 0 1,0,0
-64,0 0 1,0,0
-65,0 0 1,1,1
-66,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 18.443318287s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '18s'}]}}",2,0
-67,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 18.443318287s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '18s'}]}}",2,0
-68,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 18.443318287s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '18s'}]}}",2,0
-69,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 2.164022852s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'model': 'gemini-2.5-flash', 'location': 'global'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '2s'}]}}",2,0
-70,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 2.164022852s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'model': 'gemini-2.5-flash', 'location': 'global'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '2s'}]}}",2,1
-71,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 2.164022852s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'model': 'gemini-2.5-flash', 'location': 'global'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '2s'}]}}",2,0
-72,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 45.879020247s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '45s'}]}}",2,0
-73,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 45.879020247s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '45s'}]}}",2,0
-74,"Error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 45.879020247s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '45s'}]}}",2,0
+12,,2,0
+13,,2,0
+14,,2,1
+15,,2,0
+16,,2,0
+17,,2,0
+18,,2,0
+19,,2,1
+20,,2,0
+21,,2,0
+22,,2,0
+23,,2,0
+24,,2,1
+25,,2,0
+26,,2,0
+27,,2,0
+28,,2,0
+29,,2,1
+30,,2,0
+31,,2,0
+32,,2,0
+33,,2,0
+34,,2,0
+35,,2,0
+36,,2,1
+37,,2,0
+38,,2,0
+39,,2,0
+40,,2,0
+41,,2,1
+42,,2,0
+43,,2,0
+44,,2,0
+45,,2,0
+46,,2,1
+47,,2,0
+48,,2,0
+49,,2,0
+50,,2,0
+51,,2,1
+52,,2,0
+53,,2,0
+54,,2,0
+55,,2,0
+56,,2,1
+57,,2,0
+58,,2,0
+59,,2,0
+60,,2,1
+61,,2,0
+62,,2,0
+63,,2,0
+64,,2,0
+65,,2,1
+66,,2,0
+67,,2,0
+68,,2,0
+69,,2,0
+70,,2,1
+71,,2,0
+72,,2,0
+73,,2,0
+74,,2,0

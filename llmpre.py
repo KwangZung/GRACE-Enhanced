@@ -15,12 +15,21 @@ load_dotenv()
 # CONFIG
 # ======================
 MODEL = "gemini-2.5-flash"
-API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not API_KEY:
-    raise ValueError("❌ GEMINI_API_KEY not found. Check your .env file.")
+API_KEYS = os.getenv("GEMINI_API_KEYS")
 
-client = genai.Client(api_key=API_KEY)
+if not API_KEYS:
+    raise ValueError("❌ GEMINI_API_KEYS not found in .env")
+
+API_KEYS = [k.strip() for k in API_KEYS.split(",")]
+
+current_key_index = 0
+
+def create_client():
+    global current_key_index
+    return genai.Client(api_key=API_KEYS[current_key_index])
+
+client = create_client()
 
 REQUESTS_PER_MIN = 12  # An toàn với free tier (limit 15/phút)
 MIN_INTERVAL = 60 / REQUESTS_PER_MIN
@@ -36,6 +45,18 @@ def rate_limit():
     if elapsed < MIN_INTERVAL:
         time.sleep(MIN_INTERVAL - elapsed)
     last_call = time.time()
+
+# ==========================
+# SWITCH_API
+# ========================== 
+def switch_api():
+    global current_key_index, client
+
+    current_key_index = (current_key_index + 1) % len(API_KEYS)
+
+    print(f"🔁 Switching to API key #{current_key_index}")
+
+    client = create_client()
 
 # ======================
 # UTILS
@@ -152,11 +173,19 @@ def main():
                 preds = extract_labels(raw_resp, len(batch_targets))
                 break
             except Exception as e:
-                print(f"\n⚠️ Lỗi ở batch {i}: {e}")
-                if attempt == max_retries - 1:
-                    raw_resp = f"Error: {e}"
-                    preds = [2] * len(batch_targets) # Đánh rớt (nhãn 2) nếu thử 3 lần đều xịt
-                time.sleep(5)
+                if "RESOURCE_EXHAUSTED" in str(e):
+
+                    print("⚠️ Quota exceeded → switching API key")
+
+                    switch_api()
+
+                    time.sleep(1)
+
+                    continue
+
+        # đảm bảo preds có đủ phần tử
+        if len(preds) < len(batch_targets):
+            preds += [2] * (len(batch_targets) - len(preds))
 
         # Lưu kết quả an toàn
         for j, item in enumerate(batch_targets):
