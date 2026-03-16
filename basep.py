@@ -1,119 +1,259 @@
-import openai
+from google import genai
+from google.genai import types
 import pandas as pd
 from tqdm import tqdm
-import os
 import json
 import csv
-import logging
+import os
+import re
+import time
+from dotenv import load_dotenv
 
-openai.api_base = ""
-openai.api_key = ""
+load_dotenv()
 
-templates = {
-    1: 'In the above code snippet, check for potential security vulnerabilities and output either \'Vulnerable\' or \'Non-vulnerable\'. '
-       'You are now an excellent programmer.'
-       'You are conducting a function vulnerability detection task for Java language.',
-    2: 'The node information of the function is as follows:',
-    3: 'The edge information of the function is as follows:',
-    4: 'Here is an example for you to learn from:'
-}
+# ======================
+# CONFIG (GIỮ NGUYÊN)
+# ======================
+MODEL = "gemini-2.5-flash"
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+API_KEYS = os.getenv("GEMINI_API_KEYS")
 
-fh = logging.FileHandler('devignmetricsgpt4.log')
-fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-fh.setFormatter(logging.Formatter(fmt))
+if not API_KEYS:
+    raise ValueError("❌ GEMINI_API_KEYS not found in .env")
 
-logger.addHandler(fh)
+API_KEYS = [k.strip() for k in API_KEYS.split(",")]
+
+current_key_index = 0
+
+def create_client():
+    global current_key_index
+    return genai.Client(api_key=API_KEYS[current_key_index])
+
+client = create_client()
+
+REQUESTS_PER_MIN = 12
+MIN_INTERVAL = 60 / REQUESTS_PER_MIN
+BATCH_SIZE = 3
+last_call = 0
 
 
+# ======================
+# RATE LIMIT (GIỮ NGUYÊN)
+# ======================
+def rate_limit():
+    global last_call
+    elapsed = time.time() - last_call
+    if elapsed < MIN_INTERVAL:
+        time.sleep(MIN_INTERVAL - elapsed)
+    last_call = time.time()
+
+
+# ======================
+# SWITCH API (GIỮ NGUYÊN)
+# ======================
+def switch_api():
+    global current_key_index, client
+
+    current_key_index = (current_key_index + 1) % len(API_KEYS)
+
+    print(f"🔁 Switching to API key #{current_key_index}")
+
+    client = create_client()
+
+
+# ======================
+# UTILS (GIỮ NGUYÊN)
+# ======================
+def clean_text(text):
+    return " ".join(str(text).split())
+
+
+def extract_labels(text, expected_count):
+
+    matches = re.findall(r"\b(0|1)\b", text)
+
+    extracted = (
+        [int(x) for x in matches[-expected_count:]]
+        if len(matches) >= expected_count
+        else [int(x) for x in matches]
+    )
+
+    while len(extracted) < expected_count:
+        extracted.append(2)
+
+    return extracted
+
+
+def calculate_metrics(predictions, ground_truth):
+
+    tp = sum(1 for p, t in zip(predictions, ground_truth) if p == t == 1)
+    tn = sum(1 for p, t in zip(predictions, ground_truth) if p == t == 0)
+    fp = sum(1 for p, t in zip(predictions, ground_truth) if p == 1 and t == 0)
+    fn = sum(1 for p, t in zip(predictions, ground_truth) if p == 0 and t == 1)
+
+    accuracy = (tp + tn) / len(predictions) if len(predictions) > 0 else 0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+    return accuracy, precision, recall, f1
+
+
+# ======================
+# CALL GEMINI (GIỮ NGUYÊN)
+# ======================
+def call_gemini(prompt):
+
+    rate_limit()
+
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.0
+        )
+    )
+
+    return response.text
+
+
+# ======================
+# PROMPT BUILDER (BASELINE)
+# ======================
+def build_prompt(batch_targets, batch_examples, batch_labels):
+
+    prompt = f"""You are an elite Java security expert detecting OS Command Injection (CWE-78).
+
+Analyze the following {len(batch_targets)} Java functions.
+
+For EACH function determine whether it is vulnerable.
+
+Output ONLY exactly {len(batch_targets)} digits (0 or 1) separated by spaces.
+
+1 = Vulnerable
+0 = Non-vulnerable
+
+"""
+
+    for i in range(len(batch_targets)):
+
+        target = batch_targets[i]
+
+        prompt += f"""--- CASE {i+1} ---
+Code:
+{target['func'][:1000]}
+
+"""
+
+    prompt += f"""Output format example for {len(batch_targets)} cases:
+1 0 1"""
+
+    return prompt
+
+
+# ======================
+# MAIN (GIỮ NGUYÊN)
+# ======================
 def main():
-    with open('F:/pycharmfile/vulllm/devign_data/devign_test_processed.json', 'r') as f:
-        data = json.load(f)
 
-    def calculate_metrics(predictions, ground_truth):
-        true_positives = 0
-        false_positives = 0
-        false_negatives = 0
-        true_negatives = 0
+    print("🚀 BASELINE + Gemini Batch Pipeline")
 
-        for pred, target in zip(predictions, ground_truth):
-            if pred == target == 1:
-                true_positives += 1
-            elif pred == target == 0:
-                true_negatives += 1
-            elif pred == 1 and target == 0:
-                false_positives += 1
-            elif pred == 0 and target == 1:
-                false_negatives += 1
+    with open("data/test_processed.json") as f:
+        test_data = json.load(f)
 
-        accuracy = (true_positives + true_negatives) / len(predictions)
-        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        return accuracy, precision, recall, f1
+    with open("data/train_processed.json") as f:
+        train_data = json.load(f)
 
-    prediction_ls = []
-    ground_truth = []
+    df_sim = pd.read_csv("sim_code.csv", header=None)
+    retrieved_codes = df_sim[0].fillna("").tolist()
 
-    for row in data[0:2000]:
-        if 'func' in row:
-            inputCode = row['func'][:4000]
-        if 'node' in row:
-            inputnode = row['node'][:2000]
-        if 'edge' in row:
-            inputedge = row['edge'][:2000]
-        if 'func' in row:
-            inputex = row['example'][:4000]
+    train_label_dict = {clean_text(x["func"]): x["target"] for x in train_data}
 
+    csv_file = "baseline_predictions.csv"
 
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "user", "content": format(inputCode)+templates[1]}
-                ]
-            )
-            prediction = response['choices'][0]['message']['content']
-            print(prediction)
+    with open(csv_file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["Query_Index", "LLM_Response", "Prediction", "GroundTruth"]
+        )
 
-            with open('devignresultsgpt4.csv', 'a', newline='') as f:
+    predictions = []
+    labels = []
+
+    for i in tqdm(range(0, len(test_data), BATCH_SIZE), desc="Đang quét Batch"):
+
+        batch_targets = test_data[i : i + BATCH_SIZE]
+        batch_examples = retrieved_codes[i : i + BATCH_SIZE]
+        batch_labels = [
+            train_label_dict.get(clean_text(ex), 0) for ex in batch_examples
+        ]
+
+        prompt = build_prompt(batch_targets, batch_examples, batch_labels)
+
+        max_retries = 3
+        preds = []
+        raw_resp = ""
+
+        for attempt in range(max_retries):
+
+            try:
+
+                raw_resp = call_gemini(prompt)
+
+                preds = extract_labels(raw_resp, len(batch_targets))
+
+                break
+
+            except Exception as e:
+
+                if "RESOURCE_EXHAUSTED" in str(e):
+
+                    print("⚠️ Quota exceeded → switching API key")
+
+                    switch_api()
+
+                    time.sleep(1)
+
+                    continue
+
+        if len(preds) < len(batch_targets):
+
+            preds += [2] * (len(batch_targets) - len(preds))
+
+        for j, item in enumerate(batch_targets):
+
+            pred = preds[j]
+
+            truth = item["target"]
+
+            predictions.append(pred)
+
+            labels.append(truth)
+
+            with open(csv_file, "a", newline="", encoding="utf-8") as f:
+
                 writer = csv.writer(f)
-                writer.writerow(['result'])
-                writer.writerow(prediction)
-                f.close()
 
-            if prediction == "0" or prediction == "1":
-                prediction = int(prediction)
-            else:
-                prediction = 2
+                writer.writerow(
+                    [i + j, raw_resp.replace("\n", " "), pred, truth]
+                )
 
-            prediction_ls.append(prediction)
-            ground_truth.append(row['target'])
-            # print(inputCode)
-            # print(inputnode)
-            # print(inputedge)
+    acc, prec, rec, f1 = calculate_metrics(predictions, labels)
 
-        with open('devignresultsgpt4.csv', 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Prediction', 'Groundtruth'])
-            writer.writerows(zip(prediction_ls, ground_truth))
+    print("\n" + "=" * 40)
 
-        print(prediction_ls)
-        print(ground_truth)
+    print("🏆 BASELINE RESULTS")
 
-        accuracy, precision, recall, f1 = calculate_metrics(prediction_ls, ground_truth)
-        print("Accuracy:", accuracy)
-        print("Precision:", precision)
-        print("Recall:", recall)
-        print("F1 Score:", f1)
+    print("=" * 40)
 
-        logger.info("Accuracy: %f", accuracy)
-        logger.info("Precision: %f", precision)
-        logger.info("Recall: %f", recall)
-        logger.info("F1 Score: %f", f1)
+    print(f"Accuracy  : {acc * 100:.2f}%")
 
-if __name__ == '__main__':
+    print(f"Precision : {prec * 100:.2f}%")
+
+    print(f"Recall    : {rec * 100:.2f}%")
+
+    print(f"F1 Score  : {f1 * 100:.2f}%")
+
+
+if __name__ == "__main__":
     main()
-
-
