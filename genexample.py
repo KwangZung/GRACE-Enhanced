@@ -10,7 +10,7 @@ import pandas as pd
 from huggingface_hub import hf_hub_download
 import json
 
-from bert_whitening import sents_to_vecs, transform_and_normalize, compute_whitening
+from utils.bert_whitening import sents_to_vecs, transform_and_normalize, compute_whitening
 
 # ==========================================
 # 1. SETUP TOKENIZER & MODEL

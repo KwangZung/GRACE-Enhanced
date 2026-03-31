@@ -1,5 +1,4 @@
-from google import genai
-from google.genai import types
+from openai import OpenAI
 import pandas as pd
 from tqdm import tqdm
 import json
@@ -14,12 +13,12 @@ load_dotenv()
 # ======================
 # CONFIG
 # ======================
-MODEL = "gemini-2.5-flash"
+MODEL = "deepseek-chat"
 
-API_KEYS = os.getenv("GEMINI_API_KEYS")
+API_KEYS = os.getenv("DEEPSEEK_API_KEYS")
 
 if not API_KEYS:
-    raise ValueError("❌ GEMINI_API_KEYS not found in .env")
+    raise ValueError("❌ DEEPSEEK_API_KEYS not found in .env")
 
 API_KEYS = [k.strip() for k in API_KEYS.split(",")]
 
@@ -27,7 +26,7 @@ current_key_index = 0
 
 def create_client():
     global current_key_index
-    return genai.Client(api_key=API_KEYS[current_key_index])
+    return OpenAI(api_key=API_KEYS[current_key_index], base_url="https://api.deepseek.com")
 
 client = create_client()
 
@@ -80,7 +79,7 @@ def calculate_metrics(predictions, ground_truth):
     tn = sum(1 for p, t in zip(predictions, ground_truth) if p == t == 0)
     fp = sum(1 for p, t in zip(predictions, ground_truth) if p == 1 and t == 0)
     fn = sum(1 for p, t in zip(predictions, ground_truth) if p == 0 and t == 1)
-    num_of_pred
+    
 
     accuracy = (tp + tn) / len(predictions) if len(predictions) > 0 else 0
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
@@ -89,18 +88,16 @@ def calculate_metrics(predictions, ground_truth):
     return accuracy, precision, recall, f1
 
 # ======================
-# CALL GEMINI
+# CALL DEEPSEEK
 # ======================
-def call_gemini(prompt):
+def call_deepseek(prompt):
     rate_limit()
-    response = client.models.generate_content(
+    response = client.chat.completions.create(
         model=MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.0
-        )
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0
     )
-    return response.text
+    return response.choices[0].message.content
 
 # ======================
 # PROMPT BUILDER (Fixed RAG Logic)
@@ -135,7 +132,7 @@ Example format for 3 cases: 1 0 1"""
 # MAIN
 # ======================
 def main():
-    print("🚀 GRACE + Gemini Batch-Optimized Pipeline")
+    print("🚀 GRACE + DeepSeek Batch-Optimized Pipeline")
 
     with open("data/test_processed.json") as f:
         test_data = json.load(f)
@@ -170,19 +167,21 @@ def main():
         
         for attempt in range(max_retries):
             try:
-                raw_resp = call_gemini(prompt)
+                raw_resp = call_deepseek(prompt)
+                print(f"\n🤖 LLM Response:\n{raw_resp}")
                 preds = extract_labels(raw_resp, len(batch_targets))
                 break
             except Exception as e:
-                if "RESOURCE_EXHAUSTED" in str(e):
+                err_msg = str(e).lower()
+                print(f"\n❌ Lỗi khi gọi API (Lần thử {attempt+1}): {e}")
+                if "rate limit" in err_msg or "429" in err_msg or "resource_exhausted" in err_msg or "insufficient_quota" in err_msg:
 
-                    print("⚠️ Quota exceeded → switching API key")
+                    print(f"⚠️ Quota exceeded, or rate limited → switching API key")
 
                     switch_api()
 
-                    time.sleep(1)
-
-                    continue
+                time.sleep(1)
+                continue
 
         # đảm bảo preds có đủ phần tử
         if len(preds) < len(batch_targets):
